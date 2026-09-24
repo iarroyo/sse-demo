@@ -1,0 +1,52 @@
+@import "tailwindcss";
+@source "../**/*.{gts,gjs,ts,js,hbs,html}";
+
+@theme {
+  --animate-slide-in: slideIn 0.25s cubic-bezier(0.16, 1, 0.3, 1);
+  --animate-fade-out: fadeOut 0.45s ease-in forwards;
+}
+
+@keyframes slideIn {
+  from { transform: translateX(110%); opacity: 0; }
+  to   { transform: translateX(0);    opacity: 1; }
+}
+
+@keyframes fadeOut {
+  from { opacity: 1; }
+  to   { opacity: 0; }
+}
+
+/* Avatar palette – 6 slots, referenced by .av-0 … .av-5 */
+.av-0 { background: oklch(0.55 0.22 264); }
+.av-1 { background: oklch(0.55 0.22 293); }
+.av-2 { background: oklch(0.55 0.22 220); }
+.av-3 { background: oklch(0.55 0.18 160); }
+.av-4 { background: oklch(0.60 0.20  50); }
+.av-5 { background: oklch(0.58 0.22  15); }
+
+@layer components {
+  .btn {
+    @apply inline-flex items-center gap-1.5 px-4 py-2 rounded-lg text-sm font-medium
+           transition-all duration-150 cursor-pointer select-none
+           disabled:opacity-50 disabled:cursor-not-allowed;
+  }
+  .btn-primary   { @apply bg-indigo-600 text-white shadow-sm hover:bg-indigo-700 active:scale-95; }
+  .btn-secondary { @apply bg-white text-slate-700 border border-slate-200 hover:bg-slate-50 active:scale-95; }
+  .btn-danger    { @apply bg-red-50 text-red-600 border border-red-200 hover:bg-red-100 active:scale-95; }
+  .btn-ghost     { @apply text-slate-600 hover:bg-slate-100 active:scale-95; }
+  .btn-sm        { @apply px-3 py-1.5 text-xs; }
+
+  .input {
+    @apply w-full rounded-lg border border-slate-200 bg-white px-3 py-2 text-sm
+           text-slate-900 placeholder:text-slate-400
+           focus:outline-none focus:ring-2 focus:ring-indigo-500 focus:border-transparent transition;
+  }
+
+  .card        { @apply bg-white rounded-xl border border-slate-100 shadow-sm; }
+
+  .modal-backdrop { @apply fixed inset-0 bg-black/40 backdrop-blur-sm z-40 flex items-center justify-center p-4; }
+  .modal-panel    { @apply bg-white rounded-2xl shadow-2xl border border-slate-100 w-full max-w-md relative z-50 p-6; }
+
+  .badge-own    { @apply inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium bg-indigo-50 text-indigo-700; }
+  .badge-shared { @apply inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium bg-slate-100 text-slate-600; }
+}

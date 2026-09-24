@@ -1,0 +1,23 @@
+<!DOCTYPE html>
+<html>
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1" />
+    <title>SSE Demo Tests</title>
+    {{content-for "head"}}
+    {{content-for "head-footer"}}
+  </head>
+  <body>
+    <div id="qunit"></div>
+    <div id="qunit-fixture">
+      <div id="ember-testing-container">
+        <div id="ember-testing"></div>
+      </div>
+    </div>
+    {{content-for "body"}}
+    <script src="/assets/test-support.js"></script>
+    <script src="/assets/sse-demo.js"></script>
+    <script src="/assets/tests.js"></script>
+    {{content-for "body-footer"}}
+  </body>
+</html>

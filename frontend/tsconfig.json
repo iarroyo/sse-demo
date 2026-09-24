@@ -1,0 +1,9 @@
+{
+  "extends": "@ember/app-tsconfig/tsconfig.json",
+  "include": ["app/**/*", "tests/**/*"],
+  "compilerOptions": {
+    "paths": {
+      "sse-demo/*": ["./app/*"]
+    }
+  }
+}
