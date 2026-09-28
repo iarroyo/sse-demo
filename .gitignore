@@ -1,13 +1,13 @@
 # Backend
-backend/target/
-backend/.mvn/wrapper/maven-wrapper.jar
+backend/build/
+backend/.gradle/
+backend/gradle/wrapper/gradle-wrapper.jar
 
 # Frontend
 frontend/node_modules/
 frontend/dist/
 frontend/.embroider/
 frontend/tmp/
-frontend/node_modules/
 
 # IDE
 .idea/
