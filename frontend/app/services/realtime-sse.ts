@@ -148,7 +148,7 @@ export default class RealtimeSseService extends Service {
   }
 
   /** Establish SSE connection — call after user re-authenticates */
-  reconnect() {
+  connect() {
     this.worker?.port.postMessage({ type: 'connect-sse' });
   }
 }
