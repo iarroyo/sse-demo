@@ -8,7 +8,8 @@
  *   { type: 'subscribe',   topic: string }       → register interest in a topic
  *   { type: 'unsubscribe', topic: string }       → deregister interest
  *   { type: 'disconnect' }                       → port is closing (tab navigation/close)
- *   { type: 'reconnect-sse' }                    → force SSE reconnect (after re-login)
+ *   { type: 'disconnect-sse' }                   → close SSE connection (on logout)
+ *   { type: 'connect-sse' }                      → establish SSE connection (after re-login)
  *
  * Worker → port messages:
  *   { type: 'worker:ready', portId: number }     → handshake complete
@@ -139,7 +140,11 @@ self.onconnect = (connectEvent) => {
         removePort(portId);
         break;
 
-      case 'reconnect-sse':
+      case 'disconnect-sse':
+        disconnectSSE();
+        break;
+
+      case 'connect-sse':
         disconnectSSE();
         connectSSE();
         break;
