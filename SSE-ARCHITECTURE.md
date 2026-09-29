@@ -40,7 +40,8 @@ server load.
 | `{ type: 'subscribe', topic }` | Register interest in a topic |
 | `{ type: 'unsubscribe', topic }` | Deregister interest in a topic |
 | `{ type: 'disconnect' }` | Tab is closing / navigating away |
-| `{ type: 'reconnect-sse' }` | Force SSE reconnect (e.g. after re-login) |
+| `{ type: 'disconnect-sse' }` | Close SSE connection without reconnecting (on logout) |
+| `{ type: 'connect-sse' }` | Establish SSE connection (e.g. after re-login) |
 
 ### Worker → Tab
 
@@ -154,8 +155,14 @@ component or route is destroyed (navigation away, component teardown).
 
 ### 5. Tab closes or navigates away
 
+There are two distinct paths depending on how the tab exits.
+
+**In-app navigation (Ember route teardown):**
+Ember destroys services and components as part of the route lifecycle. `registerDestructor`
+fires, which runs `teardown()` explicitly:
+
 ```
-Tab unloads
+Ember app / service destroyed
   └─► RealtimeSseService.teardown()
         ├─► worker ← { type: 'disconnect' }
         │     └─► portRegistry.delete(portId)
@@ -163,8 +170,25 @@ Tab unloads
         └─► worker.port.close()
 ```
 
-If other tabs remain open, the SSE connection stays alive. If this was the last tab, the
-SSE connection is closed and the worker process becomes idle (browser may terminate it).
+**Hard tab close or browser kill (Ctrl+W, crash, process termination):**
+The JavaScript context is destroyed by the browser with no opportunity to run code.
+`teardown()` never executes and no `disconnect` message is ever sent. The worker only
+discovers the port is gone the next time it attempts to write to it — either on the next
+incoming SSE event or on the next heartbeat broadcast. This is the dead port detection
+path (see Scenario 9).
+
+```
+Tab killed by browser
+  └─► (no JS runs — teardown() is never called)
+
+Next SSE event or heartbeat
+  └─► worker tries port.postMessage(...)
+        └─► throws → port added to dead[] → removePort(portId)
+              └─► if portRegistry.size === 0 → disconnectSSE()
+```
+
+In both cases, if other tabs remain open the backend SSE connection is unaffected. If this
+was the last tab, the connection is closed once the dead port is detected.
 
 ---
 
@@ -192,21 +216,47 @@ the SSE reconnect intact.
 
 ---
 
-### 7. Forced reconnect after re-login
+### 7. Logout and re-login (forced re-authentication)
 
-When the user logs out and back in, the SSE connection needs new credentials (session
-cookie). The service exposes a `reconnect()` method for this:
+Re-authentication is handled in two explicit steps to avoid a 401 retry loop.
+
+**Step 1 — Logout: close SSE before the session is invalidated**
+
+If the `EventSource` is left open when the backend invalidates the session, it will
+trigger `onerror` and immediately try to reconnect — but with the now-invalid cookie,
+every reconnect attempt gets a 401. The worker keeps broadcasting `sse:reconnecting` to
+all ports in a tight retry loop until something stops it.
+
+To prevent this, `SessionService.logout()` calls `disconnect()` on the service *before*
+hitting the logout endpoint:
 
 ```
-User logs in again
+User logs out
+  └─► RealtimeSseService.disconnect()
+        └─► worker ← { type: 'disconnect-sse' }
+              └─► disconnectSSE()   # EventSource closed cleanly, no auto-reconnect
+
+  └─► POST /api/auth/logout         # session invalidated after SSE is already gone
+```
+
+**Step 2 — Re-login: open a fresh SSE connection**
+
+After a successful login the new session cookie is set by the browser. `reconnect()` is
+called to open a new `EventSource`, which picks up the fresh cookie automatically:
+
+```
+User logs in
+  └─► POST /api/auth/login → Set-Cookie: SESSION=<new>
+
   └─► RealtimeSseService.reconnect()
-        └─► worker ← { type: 'reconnect-sse' }
-              ├─► disconnectSSE()   # close old EventSource (stale credentials)
-              └─► connectSSE()      # open new EventSource (new session cookie sent)
+        └─► worker ← { type: 'connect-sse' }
+              ├─► disconnectSSE()   # no-op: already closed at logout
+              └─► connectSSE()      # new EventSource opened with fresh session cookie
 ```
 
-Topic subscriptions in `portRegistry` are preserved across this cycle, so events resume
-without requiring components to re-subscribe.
+Topic subscriptions stored in `portRegistry` are untouched across both steps — only the
+`EventSource` object is replaced, so events resume without any component needing to
+re-subscribe.
 
 ---
 
