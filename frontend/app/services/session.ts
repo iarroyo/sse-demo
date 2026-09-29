@@ -54,6 +54,9 @@ export default class SessionService extends Service {
   }
 
   async logout(): Promise<void> {
+    // Close SSE before the session is invalidated so the worker does not
+    // enter a 401 auto-reconnect loop while the user is on the login screen.
+    this.realtimeSse.disconnect();
     await fetch('/api/auth/logout', { method: 'POST', credentials: 'include' });
     this.currentUser = null;
   }

@@ -142,9 +142,14 @@ export default class RealtimeSseService extends Service {
     }
   }
 
-  /** Force SSE reconnect — call after user re-authenticates */
+  /** Close the SSE connection — call on logout to stop the 401 retry loop */
+  disconnect() {
+    this.worker?.port.postMessage({ type: 'disconnect-sse' });
+  }
+
+  /** Establish SSE connection — call after user re-authenticates */
   reconnect() {
-    this.worker?.port.postMessage({ type: 'reconnect-sse' });
+    this.worker?.port.postMessage({ type: 'connect-sse' });
   }
 }
 
