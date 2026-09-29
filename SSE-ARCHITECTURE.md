@@ -241,14 +241,14 @@ User logs out
 
 **Step 2 — Re-login: open a fresh SSE connection**
 
-After a successful login the new session cookie is set by the browser. `reconnect()` is
+After a successful login the new session cookie is set by the browser. `connect()` is
 called to open a new `EventSource`, which picks up the fresh cookie automatically:
 
 ```
 User logs in
   └─► POST /api/auth/login → Set-Cookie: SESSION=<new>
 
-  └─► RealtimeSseService.reconnect()
+  └─► RealtimeSseService.connect()
         └─► worker ← { type: 'connect-sse' }
               ├─► disconnectSSE()   # no-op: already closed at logout
               └─► connectSSE()      # new EventSource opened with fresh session cookie
