@@ -12,9 +12,10 @@
  *   { type: 'connect-sse' }                      → establish SSE connection (after re-login)
  *
  * Worker → port messages:
- *   { type: 'worker:ready', portId: number }     → handshake complete
+ *   { type: 'worker:ready', portId: number, emitterId: string|null } → handshake complete
  *   { type: 'sse:connected' }                    → SSE link up
  *   { type: 'sse:reconnecting' }                 → SSE link dropped, auto-reconnecting
+ *   { type: 'emitter:id', emitterId: string }    → server-assigned emitter ID
  *   { topic: string, payload: object }           → event routed to subscriber
  */
 
@@ -24,6 +25,9 @@ let portCounter = 0;
 
 /** @type {EventSource | null} */
 let eventSource = null;
+
+/** @type {string | null} */
+let currentEmitterId = null;
 
 // ---------------------------------------------------------------------------
 // SSE lifecycle
@@ -42,6 +46,11 @@ function connectSSE() {
   eventSource.onmessage = (event) => {
     try {
       const message = JSON.parse(event.data);
+      if (message.type === 'emitter:id') {
+        currentEmitterId = message.emitterId;
+        broadcastToAll({ type: 'emitter:id', emitterId: currentEmitterId });
+        return;
+      }
       if (message.topic && message.payload !== undefined) {
         routeToSubscribers(message.topic, message.payload);
       }
@@ -141,10 +150,12 @@ self.onconnect = (connectEvent) => {
         break;
 
       case 'disconnect-sse':
+        currentEmitterId = null;
         disconnectSSE();
         break;
 
       case 'connect-sse':
+        currentEmitterId = null;
         disconnectSSE();
         connectSSE();
         break;
@@ -160,5 +171,5 @@ self.onconnect = (connectEvent) => {
   };
 
   port.start();
-  port.postMessage({ type: 'worker:ready', portId });
+  port.postMessage({ type: 'worker:ready', portId, emitterId: currentEmitterId });
 };

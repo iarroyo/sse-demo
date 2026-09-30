@@ -9,9 +9,7 @@ import org.springframework.stereotype.Service;
 import org.springframework.web.servlet.mvc.method.annotation.SseEmitter;
 
 import java.io.IOException;
-import java.util.ArrayList;
-import java.util.List;
-import java.util.Map;
+import java.util.*;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.CopyOnWriteArrayList;
 
@@ -22,21 +20,67 @@ public class SseEmitterService {
 
     private final ObjectMapper objectMapper;
 
-    // userId -> list of active emitters (multiple devices/tabs per user)
+    // userId -> list of active emitters (multiple devices/browsers per user)
     private final Map<String, CopyOnWriteArrayList<SseEmitter>> emitters = new ConcurrentHashMap<>();
 
-    public SseEmitter createEmitter(String userId) {
-        // Long timeout — client reconnects automatically via EventSource
-        SseEmitter emitter = new SseEmitter(Long.MAX_VALUE);
-        emitters.computeIfAbsent(userId, k -> new CopyOnWriteArrayList<>()).add(emitter);
+    // emitterId -> emitter (for subscription lookup during publish)
+    private final Map<String, SseEmitter> emittersById = new ConcurrentHashMap<>();
 
-        Runnable cleanup = () -> removeEmitter(userId, emitter);
+    // emitter -> emitterId (reverse lookup for cleanup)
+    private final Map<SseEmitter, String> emitterIdByEmitter = new ConcurrentHashMap<>();
+
+    // emitterId -> subscribed topics
+    private final Map<String, Set<String>> emitterTopics = new ConcurrentHashMap<>();
+
+    public SseEmitter createEmitter(String userId) {
+        String emitterId = UUID.randomUUID().toString();
+        SseEmitter emitter = new SseEmitter(Long.MAX_VALUE);
+
+        emitters.computeIfAbsent(userId, k -> new CopyOnWriteArrayList<>()).add(emitter);
+        emittersById.put(emitterId, emitter);
+        emitterIdByEmitter.put(emitter, emitterId);
+        emitterTopics.put(emitterId, ConcurrentHashMap.newKeySet());
+
+        Runnable cleanup = () -> {
+            removeEmitter(userId, emitter);
+            cleanupEmitter(emitterId);
+        };
         emitter.onCompletion(cleanup);
         emitter.onTimeout(cleanup);
         emitter.onError(e -> cleanup.run());
 
-        log.debug("SSE emitter created for user={}", userId);
+        // Send emitterId as the first event so the client can identify this connection
+        try {
+            emitter.send(SseEmitter.event()
+                    .name("message")
+                    .data(objectMapper.writeValueAsString(
+                            Map.of("type", "emitter:id", "emitterId", emitterId))));
+        } catch (IOException e) {
+            log.warn("Failed to send emitter:id for emitterId={}", emitterId);
+        }
+
+        log.debug("SSE emitter created for user={}, emitterId={}", userId, emitterId);
         return emitter;
+    }
+
+    public void addSubscription(String emitterId, String topic) {
+        Set<String> topics = emitterTopics.get(emitterId);
+        if (topics == null) {
+            log.warn("addSubscription: unknown emitterId={}", emitterId);
+            return;
+        }
+        topics.add(topic);
+        log.debug("Subscription added: emitterId={}, topic={}", emitterId, topic);
+    }
+
+    public void removeSubscription(String emitterId, String topic) {
+        Set<String> topics = emitterTopics.get(emitterId);
+        if (topics == null) {
+            log.warn("removeSubscription: unknown emitterId={}", emitterId);
+            return;
+        }
+        topics.remove(topic);
+        log.debug("Subscription removed: emitterId={}, topic={}", emitterId, topic);
     }
 
     public void publish(String userId, String topic, Object payload) {
@@ -47,6 +91,16 @@ public class SseEmitterService {
         List<SseEmitter> dead = new ArrayList<>();
 
         for (SseEmitter emitter : userEmitters) {
+            String emitterId = emitterIdByEmitter.get(emitter);
+            Set<String> subscribedTopics = emitterId != null
+                    ? emitterTopics.getOrDefault(emitterId, Set.of())
+                    : Set.of();
+
+            if (!subscribedTopics.contains(topic)) {
+                log.debug("Skipping publish: emitterId={} not subscribed to topic={}", emitterId, topic);
+                continue;
+            }
+
             try {
                 emitter.send(SseEmitter.event()
                         .name("message")
@@ -74,6 +128,15 @@ public class SseEmitterService {
                 log.debug("All emitters removed for user={}", userId);
             }
         }
+    }
+
+    private void cleanupEmitter(String emitterId) {
+        SseEmitter emitter = emittersById.remove(emitterId);
+        if (emitter != null) {
+            emitterIdByEmitter.remove(emitter);
+        }
+        emitterTopics.remove(emitterId);
+        log.debug("Emitter cleaned up: emitterId={}", emitterId);
     }
 
     @Scheduled(fixedDelay = 25_000)

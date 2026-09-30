@@ -49,8 +49,8 @@ export default class SessionService extends Service {
     }
 
     this.currentUser = await res.json();
-    // Re-establish SSE connection under the new session
-    this.realtimeSse.reconnect();
+    // Establish SSE connection under the new session
+    this.realtimeSse.connect();
   }
 
   async logout(): Promise<void> {
