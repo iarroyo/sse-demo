@@ -14,7 +14,7 @@ The tabs and the SharedWorker communicate via a structured messaging protocol:
 
 - **Subscribe:** Registers a tab's interest in a specific topic.
 - **Unsubscribe:** Deregisters interest from a topic.
-- **Disconnect:** Notifies the worker that a port is going away. This is only sent during in-app Ember navigation, when the framework explicitly destroys the service. It is never sent on a hard tab close or external navigation — in those cases the JavaScript context is killed immediately and the worker discovers the dead port passively on the next write attempt.
+- **Disconnect:** Notifies the worker that a port is going away. Because `RealtimeSseService` is an application-scoped service, it is only destroyed when the Ember application itself is torn down — not on route transitions. In practice this message is rarely sent in a normal user session (test teardown or an explicit `app.destroy()` call are the typical triggers). On a hard tab close or any external navigation the JavaScript context is killed immediately and the worker discovers the dead port passively on the next write attempt.
 - **Disconnect SSE:** Closes the SSE connection without reconnecting, used on logout to prevent a 401 retry loop.
 - **Connect SSE:** Establishes a fresh SSE connection, typically used after a user re-authenticates.
 
