@@ -14,7 +14,7 @@ and the server assigns an emitter ID.
 sequenceDiagram
     participant Tab
     participant Worker as SharedWorker
-    participant Server as Spring Boot
+    participant Server as BFF
 
     Tab->>Worker: new SharedWorker()
     Worker->>Worker: portRegistry.set(portId=1, topics=∅)
@@ -44,7 +44,7 @@ sequenceDiagram
     participant TabA as Tab A (existing)
     participant Worker as SharedWorker
     participant TabB as Tab B (new)
-    participant Server as Spring Boot
+    participant Server as BFF
 
     Note over Worker: SSE already open, currentEmitterId = "abc-123"
 
@@ -69,7 +69,7 @@ sequenceDiagram
     participant Comp as Component
     participant Service as RealtimeSseService
     participant Worker as SharedWorker
-    participant Server as Spring Boot
+    participant Server as BFF
 
     Comp->>Service: subscribe("folder:123", callback)
     Note over Service: First subscriber for this topic in this tab
@@ -97,7 +97,7 @@ sequenceDiagram
     participant CompB as Component B
     participant Service as RealtimeSseService
     participant Worker as SharedWorker
-    participant Server as Spring Boot
+    participant Server as BFF
 
     CompA->>Service: unsubscribe() [callback A]
     Note over Service: callbacks["folder:123"] still has B — no worker/server message
@@ -120,7 +120,7 @@ and topics are re-registered with the server.
 sequenceDiagram
     participant Tab
     participant Worker as SharedWorker
-    participant Server as Spring Boot
+    participant Server as BFF
 
     Server-xWorker: SSE connection drops (network / server restart)
     Worker->>Worker: eventSource.onerror fires
@@ -150,7 +150,7 @@ assigned after successful re-authentication.
 sequenceDiagram
     participant Tab
     participant Worker as SharedWorker
-    participant Server as Spring Boot
+    participant Server as BFF
 
     Note over Tab: User clicks logout
     Tab->>Tab: emitterId = null
@@ -188,7 +188,7 @@ passively on the next write attempt.
 sequenceDiagram
     participant Tab
     participant Worker as SharedWorker
-    participant Server as Spring Boot
+    participant Server as BFF
 
     Note over Tab: Tab killed (Ctrl+W, crash, process termination)<br/>No JS runs — disconnect never sent
 
