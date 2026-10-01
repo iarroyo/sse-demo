@@ -35,7 +35,7 @@ tasks.register('dev') {
             vite.destroyForcibly()
         }))
 
-        exec {
+        project.exec {
             workingDir 'backend'
             commandLine './gradlew', 'bootRun'
         }
@@ -50,7 +50,7 @@ tasks.register('devNginx') {
     doLast {
         def nginxConf = file('nginx/sse-cf-sim.conf').absolutePath
 
-        exec {
+        project.exec {
             commandLine 'nginx', '-c', nginxConf
         }
 
@@ -67,7 +67,7 @@ tasks.register('devNginx') {
             vite.destroyForcibly()
         }))
 
-        exec {
+        project.exec {
             workingDir 'backend'
             commandLine './gradlew', 'bootRun'
         }
