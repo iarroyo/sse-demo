@@ -39,7 +39,7 @@ server load.
 |---------|---------|
 | `{ type: 'subscribe', topic }` | Register interest in a topic |
 | `{ type: 'unsubscribe', topic }` | Deregister interest in a topic |
-| `{ type: 'disconnect' }` | Tab is closing / navigating away |
+| `{ type: 'disconnect' }` | Ember application is being torn down (rarely sent in normal use — not triggered by tab close or route transitions) |
 | `{ type: 'disconnect-sse' }` | Close SSE connection without reconnecting (on logout) |
 | `{ type: 'connect-sse' }` | Establish SSE connection (e.g. after re-login) |
 
