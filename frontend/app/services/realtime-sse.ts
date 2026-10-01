@@ -11,8 +11,9 @@ export type Unsubscribe = () => void;
  * Provides a simple pub-sub API over a SharedWorker that manages
  * a single SSE connection per browser (regardless of tab count).
  *
- * Subscriptions are mirrored to the server via REST so the backend only
- * publishes events for topics the client is actively watching.
+ * Server-side subscription filtering is handled entirely by the SharedWorker,
+ * which tracks a global topic reference count across all ports and calls
+ * POST/DELETE /api/sse/subscriptions when a topic goes from 0->1 or 1->0.
  *
  * Usage:
  *   const unsub = this.realtimeSse.subscribe('folder:123', (payload) => { ... });
@@ -24,10 +25,8 @@ export default class RealtimeSseService extends Service {
   @tracked activeTopicCount = 0;
 
   private worker: SharedWorker | null = null;
-  /** topic → set of callbacks registered in this tab */
+  /** topic -> set of callbacks registered in this tab */
   private callbacks = new Map<string, Set<SseCallback>>();
-  /** emitter ID assigned by the server for this SSE connection */
-  private emitterId: string | null = null;
 
   constructor(...args: ConstructorParameters<typeof Service>) {
     super(...args);
@@ -60,7 +59,6 @@ export default class RealtimeSseService extends Service {
   }
 
   private teardown() {
-    // Signal the worker that this port is going away
     this.worker?.port.postMessage({ type: 'disconnect' });
     this.worker?.port.close();
     this.callbacks.clear();
@@ -74,24 +72,11 @@ export default class RealtimeSseService extends Service {
     const data = event.data as Record<string, unknown>;
 
     if (data['type'] === 'worker:ready') {
-      // Worker is fresh or restarted – re-announce subscriptions to the worker
+      // Worker is fresh or restarted - re-announce subscriptions so the worker
+      // can restore its portRegistry and topicRefCount for this tab
       this.callbacks.forEach((_, topic) => {
         this.worker?.port.postMessage({ type: 'subscribe', topic });
       });
-      // If the SSE connection was already up (e.g. second tab opening into an
-      // existing worker), the emitterId is included — re-register with server.
-      const emitterId = data['emitterId'] as string | null | undefined;
-      if (emitterId) {
-        this.emitterId = emitterId;
-        this.syncServerSubscriptions();
-      }
-      return;
-    }
-
-    if (data['type'] === 'emitter:id') {
-      // Server assigned a new emitter ID — store it and register all active topics
-      this.emitterId = data['emitterId'] as string;
-      this.syncServerSubscriptions();
       return;
     }
 
@@ -130,15 +115,14 @@ export default class RealtimeSseService extends Service {
    * Subscribe to a topic. Returns an unsubscribe function.
    *
    * Multiple callbacks can be registered for the same topic. The SharedWorker
-   * and the server each receive only ONE subscribe/unsubscribe per topic per tab.
+   * receives only ONE subscribe/unsubscribe per topic per tab and manages
+   * server-side registration globally across all tabs.
    */
   subscribe(topic: string, callback: SseCallback): Unsubscribe {
     if (!this.callbacks.has(topic)) {
       this.callbacks.set(topic, new Set());
       this.activeTopicCount = this.callbacks.size;
-      // First subscriber for this topic in this tab — tell the worker and server
       this.worker?.port.postMessage({ type: 'subscribe', topic });
-      this.serverSubscribe(topic);
     }
     this.callbacks.get(topic)!.add(callback);
 
@@ -157,60 +141,18 @@ export default class RealtimeSseService extends Service {
     if (cbs.size === 0) {
       this.callbacks.delete(topic);
       this.activeTopicCount = this.callbacks.size;
-      // Last subscriber gone — tell the worker and server
       this.worker?.port.postMessage({ type: 'unsubscribe', topic });
-      this.serverUnsubscribe(topic);
     }
   }
 
-  /** Close the SSE connection — call on logout to stop the 401 retry loop */
+  /** Close the SSE connection - call on logout to stop the 401 retry loop */
   disconnect() {
-    this.emitterId = null;
     this.worker?.port.postMessage({ type: 'disconnect-sse' });
   }
 
-  /** Establish SSE connection — call after user re-authenticates */
+  /** Establish SSE connection - call after user re-authenticates */
   connect() {
     this.worker?.port.postMessage({ type: 'connect-sse' });
-  }
-
-  // ---------------------------------------------------------------------------
-  // Server subscription sync
-  // ---------------------------------------------------------------------------
-
-  /** POST all active topics to the server (used on emitter:id and worker:ready) */
-  private syncServerSubscriptions() {
-    this.callbacks.forEach((_, topic) => this.serverSubscribe(topic));
-  }
-
-  private serverSubscribe(topic: string) {
-    if (!this.emitterId) return;
-    fetch('/api/sse/subscriptions', {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'X-Emitter-Id': this.emitterId,
-      },
-      body: JSON.stringify({ topic }),
-      credentials: 'include',
-    }).catch((err) =>
-      console.error(`[RealtimeSSE] Failed to subscribe topic "${topic}" on server:`, err),
-    );
-  }
-
-  private serverUnsubscribe(topic: string) {
-    if (!this.emitterId) return;
-    fetch('/api/sse/subscriptions', {
-      method: 'DELETE',
-      headers: {
-        'Content-Type': 'application/json',
-        'X-Emitter-Id': this.emitterId,
-      },
-      body: JSON.stringify({ topic }),
-      credentials: 'include',
-    }).catch((err) =>
-      console.error(`[RealtimeSSE] Failed to unsubscribe topic "${topic}" on server:`, err),
-    );
   }
 }
 
