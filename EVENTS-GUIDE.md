@@ -44,22 +44,22 @@ When a user opens the first tab of the application, no SharedWorker is running y
 When additional tabs are opened under the same origin, the browser recognizes that a SharedWorker is already active and reuses the existing process.
 
 1. The worker registers the new tab's port alongside the existing ones, but it skips creating a new EventSource connection because the network link is already open.
-2. The worker sends a worker:ready signal exclusively to the new tab, including the stored `emitterId` since the SSE connection is already established.
-3. The new tab responds by announcing its active topic subscriptions to the worker and immediately POSTing them to the server using the received emitter ID. No new emitter:id event is needed.
+2. The worker sends a worker:ready signal exclusively to the new tab. The SSE connection is already open, so no new emitter:id event is needed.
+3. The new tab responds by announcing its active topic subscriptions to the worker. The worker increments `topicRefCount` for each topic and sends a POST to the server only for topics that cross from 0 to 1 — topics already subscribed by another tab are skipped.
 
 **3\. Subscription Management**
 
 The system processes subscriptions using a three-layer approach:
 
-- **App layer (RealtimeSseService):** Manages a map of callbacks for each topic. Multiple UI components within the _same_ tab can listen to the exact same topic. The worker and server are only notified when the very first component subscribes to a topic, or when the final component unsubscribes.
-- **Shared Worker layer (sse-worker.js):** Tracks a set of subscribed topics for every open port. When an event arrives from the server, the worker iterates through its registry and forwards the payload only to the specific ports that requested it.
+- **App layer (RealtimeSseService):** Manages a map of callbacks for each topic. Multiple UI components within the _same_ tab can listen to the exact same topic. The worker is only notified when the very first component subscribes to a topic in that tab, or when the final component unsubscribes. The service never calls the server directly.
+- **Shared Worker layer (sse-worker.js):** Tracks a set of subscribed topics per port for routing, and a global `topicRefCount` map across all open ports. When an event arrives from the server, the worker forwards the payload only to the ports that requested it. The worker owns all REST calls to the server: it sends a POST when `topicRefCount` goes from 0 to 1 (first tab subscribing), and a DELETE when it drops from 1 to 0 (last tab unsubscribing). This prevents one tab's unsubscribe from removing a server subscription that another tab still needs.
 - **Server layer (SseEmitterService):** Tracks a set of subscribed topics for every active emitter. When publishing an event, the server skips emitters that have not registered interest in that topic, eliminating unnecessary SSE traffic when the user navigates away from a page.
 
 **4\. Unsubscribing From Topics**
 
-When an individual UI component stops listening to a topic, the tab removes its local callback. If other components in that same tab are still listening, neither the SharedWorker nor the server is notified.
+When an individual UI component stops listening to a topic, the tab removes its local callback. If other components in that same tab are still listening, the SharedWorker is not notified.
 
-Once the last remaining component unsubscribes, the tab sends an unsubscribe message to the worker and a DELETE request to the server. The worker deletes that topic from the port's active list and the server removes it from the emitter's subscription set. In our front-end framework (Ember), we use destructors to automate this cleanup whenever a component or route is destroyed.
+Once the last remaining component in a tab unsubscribes, the tab sends an unsubscribe message to the worker. The worker removes the topic from that port's active set and decrements the global count. Only if the count reaches zero — meaning no other tab is still subscribed — does the worker send a DELETE request to the server. In our front-end framework (Ember), we use destructors to automate this cleanup whenever a component or route is destroyed.
 
 **5\. Tab Closure and Navigation**
 
@@ -75,7 +75,7 @@ If the network drops or the backend server restarts, the built-in browser behavi
 
 1. The worker detects the connection error and immediately broadcasts an sse:reconnecting status to all tabs so they can update their internal states.
 2. The browser automatically attempts to reconnect in the background.
-3. Once restored, the server creates a new emitter and sends a fresh emitter:id event. The worker forwards it to all ports, and each tab re-registers its active topic subscriptions with the server under the new ID.
+3. Once restored, the server creates a new emitter and sends a fresh emitter:id event. The worker stores the new ID and immediately re-registers all active topics with the server via `syncServerSubscriptions`. Tabs are not involved in this step.
 4. The worker broadcasts an sse:connected confirmation.
 
 Worker-side topic sets are preserved during the drop so tabs do not need to re-announce subscriptions to the worker. However, any events fired by the server while the connection was entirely down are lost unless the backend explicitly supports Last-Event-ID tracking.
@@ -88,7 +88,7 @@ When a user logs out, the backend invalidates the session. If the SSE connection
 
 To prevent this, the front-end calls `disconnect()` on the SSE service before the logout request is sent. This clears the stored emitter ID and instructs the worker to close the EventSource cleanly with no auto-reconnect, so by the time the session is invalidated on the server, the connection is already gone.
 
-Once the user logs back in and the browser has received the new session cookie, the front-end calls `connect()`. This instructs the worker to establish a fresh EventSource connection. The server immediately sends a new emitter:id, and each tab re-registers its active topic subscriptions with the server. Worker-side topic sets are untouched across both steps, so events resume without any component needing to re-subscribe.
+Once the user logs back in and the browser has received the new session cookie, the front-end calls `connect()`. This instructs the worker to establish a fresh EventSource connection. The server immediately sends a new emitter:id. The worker stores it and re-registers all active topics with the server directly via `syncServerSubscriptions` — tabs are not involved. Worker-side topic sets are untouched across both steps, so events resume without any component needing to re-subscribe.
 
 **8\. Total Downtime and Fresh Restarts**
 

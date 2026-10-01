@@ -50,10 +50,12 @@ sequenceDiagram
     TabB->>Worker: new SharedWorker() (process reused)
     Worker->>Worker: portRegistry.set(portId=2, topics=∅)
     Note over Worker: connectSSE() is a no-op
-    Worker-->>TabB: worker:ready { portId: 2, emitterId: "abc-123" }
+    Worker-->>TabB: worker:ready { portId: 2 }
 
     TabB->>Worker: { type: "subscribe", topic: "folder:123" }
-    TabB->>Server: POST /api/sse/subscriptions { topic: "folder:123" }<br/>X-Emitter-Id: abc-123
+    Worker->>Worker: portRegistry[portId=2].topics.add("folder:123")
+    Worker->>Worker: incrementTopic("folder:123") - topicRefCount 0 to 1
+    Worker->>Server: POST /api/sse/subscriptions { topic: "folder:123" }<br/>X-Emitter-Id: abc-123
     Note over Server: emitterTopics["abc-123"].add("folder:123")
 ```
 
@@ -74,7 +76,8 @@ sequenceDiagram
     Note over Service: First subscriber for this topic in this tab
     Service->>Worker: { type: "subscribe", topic: "folder:123" }
     Worker->>Worker: portRegistry[portId].topics.add("folder:123")
-    Service->>Server: POST /api/sse/subscriptions { topic: "folder:123" }<br/>X-Emitter-Id: abc-123
+    Worker->>Worker: incrementTopic("folder:123") - topicRefCount 0 to 1
+    Worker->>Server: POST /api/sse/subscriptions { topic: "folder:123" }<br/>X-Emitter-Id: abc-123
     Note over Server: emitterTopics["abc-123"].add("folder:123")
 
     Note over Server: Another user creates a document in folder:123
@@ -88,7 +91,7 @@ sequenceDiagram
 
 ## 4. Unsubscribing From a Topic
 
-The last component for a topic unsubscribes - both the worker and server are notified.
+The last component for a topic unsubscribes. The worker notifies the server only if no other tab is still subscribed.
 
 ```mermaid
 sequenceDiagram
@@ -99,12 +102,13 @@ sequenceDiagram
     participant Server as BFF
 
     CompA->>Service: unsubscribe() [callback A]
-    Note over Service: callbacks["folder:123"] still has B - no worker/server message
+    Note over Service: callbacks["folder:123"] still has B - no worker message
 
     CompB->>Service: unsubscribe() [callback B - last subscriber]
     Service->>Worker: { type: "unsubscribe", topic: "folder:123" }
     Worker->>Worker: portRegistry[portId].topics.delete("folder:123")
-    Service->>Server: DELETE /api/sse/subscriptions { topic: "folder:123" }<br/>X-Emitter-Id: abc-123
+    Worker->>Worker: decrementTopic("folder:123") - topicRefCount 1 to 0
+    Worker->>Server: DELETE /api/sse/subscriptions { topic: "folder:123" }<br/>X-Emitter-Id: abc-123
     Note over Server: emitterTopics["abc-123"].delete("folder:123")<br/>Server skips this topic on future publishes
 ```
 
@@ -130,9 +134,8 @@ sequenceDiagram
     Note over Server: New emitter created<br/>old emitter + topic set discarded
     Server-->>Worker: SSE: { type: "emitter:id", emitterId: "xyz-456" }
     Worker->>Worker: currentEmitterId = "xyz-456"
-    Worker-->>Tab: { type: "emitter:id", emitterId: "xyz-456" }
-    Tab->>Tab: store emitterId = "xyz-456"
-    Tab->>Server: POST /api/sse/subscriptions per active topic<br/>X-Emitter-Id: xyz-456
+    Worker->>Worker: syncServerSubscriptions()
+    Worker->>Server: POST /api/sse/subscriptions per topic in topicRefCount<br/>X-Emitter-Id: xyz-456
 
     Worker-->>Tab: { type: "sse:connected" }
     Tab->>Tab: isConnected = true, isReconnecting = false
@@ -152,7 +155,6 @@ sequenceDiagram
     participant Server as BFF
 
     Note over Tab: User clicks logout
-    Tab->>Tab: emitterId = null
     Tab->>Worker: { type: "disconnect-sse" }
     Worker->>Worker: currentEmitterId = null
     Worker->>Worker: disconnectSSE() - EventSource closed, no auto-reconnect
@@ -168,9 +170,8 @@ sequenceDiagram
     Worker->>Server: GET /api/sse/connect (new EventSource, fresh cookie)
     Server-->>Worker: SSE: { type: "emitter:id", emitterId: "xyz-456" }
     Worker->>Worker: currentEmitterId = "xyz-456"
-    Worker-->>Tab: { type: "emitter:id", emitterId: "xyz-456" }
-    Tab->>Tab: store emitterId = "xyz-456"
-    Tab->>Server: POST /api/sse/subscriptions per active topic<br/>X-Emitter-Id: xyz-456
+    Worker->>Worker: syncServerSubscriptions()
+    Worker->>Server: POST /api/sse/subscriptions per topic in topicRefCount<br/>X-Emitter-Id: xyz-456
 
     Worker-->>Tab: { type: "sse:connected" }
     Tab->>Tab: isConnected = true
