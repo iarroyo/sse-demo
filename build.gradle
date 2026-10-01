@@ -1,0 +1,75 @@
+// Root build — orchestrates frontend and backend dev servers.
+//
+// Usage:
+//   ./gradlew dev            # Vite (:4200) proxies directly to Spring Boot (:8080)
+//   ./gradlew devNginx       # Vite (:4200) proxies via nginx (:9090) → Spring Boot (:8080)
+//                            # nginx simulates CloudFront's 60s read-timeout
+
+tasks.register('npmInstall', Exec) {
+    group = 'frontend'
+    description = 'Install frontend npm dependencies'
+    workingDir layout.projectDirectory.dir('frontend')
+    commandLine 'npm', 'install'
+    inputs.file layout.projectDirectory.file('frontend/package.json')
+    inputs.file layout.projectDirectory.file('frontend/package-lock.json')
+    outputs.dir layout.projectDirectory.dir('frontend/node_modules')
+}
+
+def startVite(Project project, String backendPort) {
+    def pb = new ProcessBuilder('npm', 'start')
+            .directory(project.file('frontend'))
+            .inheritIO()
+    pb.environment().put('BACKEND_PORT', backendPort)
+    return pb.start()
+}
+
+tasks.register('dev') {
+    group = 'application'
+    description = 'Start frontend (Vite :4200) proxying directly to Spring Boot (:8080)'
+    dependsOn 'npmInstall'
+
+    doLast {
+        def vite = startVite(project, '8080')
+
+        Runtime.runtime.addShutdownHook(new Thread({
+            vite.destroyForcibly()
+        }))
+
+        exec {
+            workingDir 'backend'
+            commandLine './gradlew', 'bootRun'
+        }
+    }
+}
+
+tasks.register('devNginx') {
+    group = 'application'
+    description = 'Start frontend + nginx (CloudFront sim :9090) + Spring Boot (:8080)'
+    dependsOn 'npmInstall'
+
+    doLast {
+        def nginxConf = file('nginx/sse-cf-sim.conf').absolutePath
+
+        exec {
+            commandLine 'nginx', '-c', nginxConf
+        }
+
+        Runtime.runtime.addShutdownHook(new Thread({
+            new ProcessBuilder('nginx', '-s', 'quit', '-c', nginxConf)
+                    .inheritIO()
+                    .start()
+                    .waitFor()
+        }))
+
+        def vite = startVite(project, '9090')
+
+        Runtime.runtime.addShutdownHook(new Thread({
+            vite.destroyForcibly()
+        }))
+
+        exec {
+            workingDir 'backend'
+            commandLine './gradlew', 'bootRun'
+        }
+    }
+}

@@ -15,7 +15,7 @@ export default defineConfig({
     port: 4200,
     proxy: {
       '/api': {
-        target: 'http://localhost:9090',
+        target: `http://localhost:${process.env.BACKEND_PORT ?? '8080'}`,
         changeOrigin: true,
         configure: (proxy) => {
           proxy.on('proxyRes', (proxyRes, req) => {
