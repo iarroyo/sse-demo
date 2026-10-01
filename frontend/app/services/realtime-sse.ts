@@ -50,8 +50,10 @@ export default class RealtimeSseService extends Service {
         type: 'classic',
       });
       this.worker.port.onmessage = (e) => this.handleWorkerMessage(e);
-      this.worker.port.onerror = (e) =>
-        console.error('[RealtimeSSE] Worker port error:', e);
+      this.worker.port.onmessageerror = (e) =>
+        console.error('[RealtimeSSE] Worker port message error:', e);
+      this.worker.onerror = (e) =>
+        console.error('[RealtimeSSE] Worker error:', e);
       this.worker.port.start();
     } catch (err) {
       console.error('[RealtimeSSE] Failed to create SharedWorker:', err);
