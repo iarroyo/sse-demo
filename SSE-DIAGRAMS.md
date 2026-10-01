@@ -22,22 +22,22 @@ sequenceDiagram
     Worker-->>Tab: worker:ready { portId: 1 }
     Note over Tab: No subscriptions to announce yet
 
-    Note over Worker: eventSource.onopen fires
-    Worker-->>Tab: { type: "sse:connected" }
-    Tab->>Tab: isConnected = true
+    Note over Worker: eventSource.onopen fires (transport open, not yet ready)
 
     Note over Worker: eventSource.onmessage fires
     Server-->>Worker: SSE: { type: "emitter:id", emitterId: "abc-123" }
     Worker->>Worker: currentEmitterId = "abc-123"
     Worker->>Worker: syncServerSubscriptions() - no-op (topicRefCount empty)
+    Worker-->>Tab: { type: "sse:connected" }
+    Tab->>Tab: isConnected = true
 ```
 
 ---
 
 ## 2. Second Tab - Reusing the Existing Worker
 
-The SharedWorker is already running. No new SSE connection is created. The stored
-`emitterId` is passed directly in `worker:ready`.
+The SharedWorker is already running. No new SSE connection is created. `sse:connected`
+is sent directly to the new port because `currentEmitterId` is already set.
 
 ```mermaid
 sequenceDiagram
@@ -52,6 +52,9 @@ sequenceDiagram
     Worker->>Worker: portRegistry.set(portId=2, topics=∅)
     Note over Worker: connectSSE() is a no-op
     Worker-->>TabB: worker:ready { portId: 2 }
+    Note over Worker: currentEmitterId set - send connected directly
+    Worker-->>TabB: { type: "sse:connected" }
+    TabB->>TabB: isConnected = true
 
     TabB->>Worker: { type: "subscribe", topic: "folder:123" }
     Worker->>Worker: portRegistry[portId=2].topics.add("folder:123")
@@ -134,15 +137,15 @@ sequenceDiagram
     Worker->>Server: GET /api/sse/connect (EventSource auto-reconnect)
     Note over Server: New emitter created<br/>old emitter + topic set discarded
 
-    Note over Worker: eventSource.onopen fires
-    Worker-->>Tab: { type: "sse:connected" }
-    Tab->>Tab: isConnected = true, isReconnecting = false
+    Note over Worker: eventSource.onopen fires (transport open, not yet ready)
 
     Note over Worker: eventSource.onmessage fires
     Server-->>Worker: SSE: { type: "emitter:id", emitterId: "xyz-456" }
     Worker->>Worker: currentEmitterId = "xyz-456"
     Worker->>Worker: syncServerSubscriptions()
     Worker->>Server: POST /api/sse/subscriptions per topic in topicRefCount<br/>X-Emitter-Id: xyz-456
+    Worker-->>Tab: { type: "sse:connected" }
+    Tab->>Tab: isConnected = true, isReconnecting = false
 ```
 
 ---
@@ -173,15 +176,15 @@ sequenceDiagram
     Tab->>Worker: { type: "connect-sse" }
     Worker->>Server: GET /api/sse/connect (new EventSource, fresh cookie)
 
-    Note over Worker: eventSource.onopen fires
-    Worker-->>Tab: { type: "sse:connected" }
-    Tab->>Tab: isConnected = true
+    Note over Worker: eventSource.onopen fires (transport open, not yet ready)
 
     Note over Worker: eventSource.onmessage fires
     Server-->>Worker: SSE: { type: "emitter:id", emitterId: "xyz-456" }
     Worker->>Worker: currentEmitterId = "xyz-456"
     Worker->>Worker: syncServerSubscriptions()
     Worker->>Server: POST /api/sse/subscriptions per topic in topicRefCount<br/>X-Emitter-Id: xyz-456
+    Worker-->>Tab: { type: "sse:connected" }
+    Tab->>Tab: isConnected = true
 ```
 
 ---

@@ -70,21 +70,22 @@ Tab receives worker:ready
   └─► re-announces all active topic subscriptions to worker (none yet at this point)
 
 EventSource opens
-  └─► eventSource.onopen fires
-        └─► worker broadcasts { type: 'sse:connected' } to all ports
-              └─► Tab sets isConnected = true
+  └─► eventSource.onopen fires   # transport is open — emitter:id not yet received
 
 Server sends first SSE frame
   └─► eventSource.onmessage fires: { type: 'emitter:id', emitterId: 'abc-123' }
-        └─► worker stores currentEmitterId = 'abc-123'
-              └─► worker calls syncServerSubscriptions()
-                    # POSTs all topics in topicRefCount (none yet — no-op)
+        ├─► worker stores currentEmitterId = 'abc-123'
+        ├─► worker calls syncServerSubscriptions()
+        │     # POSTs all topics in topicRefCount (none yet — no-op)
+        └─► worker broadcasts { type: 'sse:connected' } to all ports
+              └─► Tab sets isConnected = true
 ```
 
-`onopen` always fires before the first `onmessage` — `sse:connected` is broadcast before
-`emitter:id` is received. The worker process is now alive. `portRegistry` has one entry.
-One SSE connection is open to the backend. The server has registered the emitter and is
-ready to filter events by subscription.
+`sse:connected` is only broadcast after `emitter:id` is received — at that point the
+connection is truly ready to use (server subscriptions can be registered). The worker
+process is now alive. `portRegistry` has one entry. One SSE connection is open to the
+backend. The server has registered the emitter and is ready to filter events by
+subscription.
 
 ---
 
@@ -96,7 +97,9 @@ Tab opens
         └─► onconnect fires (same worker, new port)
               ├─► portRegistry.set(portId=2, { port, topics: new Set() })
               ├─► connectSSE()               # no-op: EventSource already open
-              └─► port.postMessage({ type: 'worker:ready', portId: 2 })
+              ├─► port.postMessage({ type: 'worker:ready', portId: 2 })
+              └─► currentEmitterId is set → port.postMessage({ type: 'sse:connected' })
+                    └─► Tab sets isConnected = true
 
 Tab receives worker:ready
   └─► re-announces all active topic subscriptions to worker
@@ -106,8 +109,10 @@ Tab receives worker:ready
 ```
 
 No new SSE connection is created. The existing connection is reused. `portRegistry` now
-has two entries. Server-side subscriptions are managed by the worker's `topicRefCount`
-— there is no need for the tab to know the `emitterId`.
+has two entries. Because `currentEmitterId` is already known at `onconnect` time, the new
+port receives `sse:connected` immediately — it does not need to wait for `onopen` or
+`onmessage`. Server-side subscriptions are managed by the worker's `topicRefCount` — there
+is no need for the tab to know the `emitterId`.
 
 ---
 
@@ -252,16 +257,16 @@ server — tabs are not involved.
 
 ```
 EventSource reconnects
-  └─► eventSource.onopen fires
-        └─► worker broadcasts { type: 'sse:connected' } to all ports
-              └─► each Tab sets isConnected = true, isReconnecting = false
+  └─► eventSource.onopen fires   # transport is open — emitter:id not yet received
 
 Server sends first SSE frame on the new connection
   └─► eventSource.onmessage fires: { type: 'emitter:id', emitterId: 'xyz-456' }
-        └─► worker stores currentEmitterId = 'xyz-456'
-              └─► syncServerSubscriptions()
-                    # POSTs each topic in topicRefCount to the server
-                    POST /api/sse/subscriptions  X-Emitter-Id: xyz-456  { topic: "..." }
+        ├─► worker stores currentEmitterId = 'xyz-456'
+        ├─► syncServerSubscriptions()
+        │     # POSTs each topic in topicRefCount to the server
+        │     POST /api/sse/subscriptions  X-Emitter-Id: xyz-456  { topic: "..." }
+        └─► worker broadcasts { type: 'sse:connected' } to all ports
+              └─► each Tab sets isConnected = true, isReconnecting = false
 ```
 
 > **Note:** Events that fired on the server during the disconnection window are lost.
@@ -309,16 +314,16 @@ User logs in
               ├─► currentEmitterId = null
               ├─► disconnectSSE()   # no-op: already closed at logout
               └─► connectSSE()      # new EventSource opened with fresh session cookie
-                    └─► eventSource.onopen fires
-                          └─► worker broadcasts { type: 'sse:connected' } to all ports
-                                └─► Tab sets isConnected = true
+                    └─► eventSource.onopen fires   # transport open, not yet ready
 
                     Server sends first SSE frame
                     └─► eventSource.onmessage fires: { type: 'emitter:id', emitterId: 'xyz-456' }
-                          └─► worker stores currentEmitterId = 'xyz-456'
-                                └─► syncServerSubscriptions()
-                                      # re-POSTs all topics in topicRefCount
-                                      POST /api/sse/subscriptions  X-Emitter-Id: xyz-456
+                          ├─► worker stores currentEmitterId = 'xyz-456'
+                          ├─► syncServerSubscriptions()
+                          │     # re-POSTs all topics in topicRefCount
+                          │     POST /api/sse/subscriptions  X-Emitter-Id: xyz-456
+                          └─► worker broadcasts { type: 'sse:connected' } to all ports
+                                └─► Tab sets isConnected = true
 ```
 
 Worker-side topic sets in `portRegistry` and `topicRefCount` are untouched across both
