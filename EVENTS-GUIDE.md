@@ -14,7 +14,7 @@ The tabs and the SharedWorker communicate via a structured messaging protocol:
 
 - **Subscribe:** Registers a tab's interest in a specific topic.
 - **Unsubscribe:** Deregisters interest from a topic.
-- **Disconnect:** Notifies the worker that a tab is closing or navigating away.
+- **Disconnect:** Notifies the worker that a port is going away. Because `RealtimeSseService` is an application-scoped service, it is only destroyed when the Ember application itself is torn down — not on route transitions. In practice this message is rarely sent in a normal user session (test teardown or an explicit `app.destroy()` call are the typical triggers). On a hard tab close or any external navigation the JavaScript context is killed immediately and the worker discovers the dead port passively on the next write attempt.
 - **Disconnect SSE:** Closes the SSE connection without reconnecting, used on logout to prevent a 401 retry loop.
 - **Connect SSE:** Establishes a fresh SSE connection, typically used after a user re-authenticates.
 
@@ -65,7 +65,7 @@ Once the last remaining component unsubscribes, the tab sends an unsubscribe mes
 
 There are two distinct paths depending on how the tab exits.
 
-When Ember destroys a route or service during in-app navigation, the teardown runs explicitly: it sends a disconnect message to the worker, which removes that port from the registry. If other tabs are still open, the backend SSE connection is completely unaffected. If this was the last tab, the worker closes the SSE connection and becomes idle until the browser terminates it.
+When the Ember application is explicitly torn down (e.g. programmatic `app.destroy()` or test teardown), the service destructor fires and sends a disconnect message to the worker, which removes that port from the registry. If other tabs are still open, the backend SSE connection is completely unaffected. If this was the last tab, the worker closes the SSE connection and becomes idle until the browser terminates it. In-app route transitions do not trigger this path — the service is application-scoped and stays alive for the entire session.
 
 When a tab is hard-closed, no JavaScript runs — the teardown never executes and no disconnect message is sent. The worker only discovers the port is gone the next time it tries to write to it, either on an incoming SSE event or on the next heartbeat. At that point the dead port is removed from the registry, and if it was the last one, the SSE connection is closed then.
 
