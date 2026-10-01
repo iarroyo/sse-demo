@@ -47,10 +47,9 @@ server load.
 
 | Message | Meaning |
 |---------|---------|
-| `{ type: 'worker:ready', portId, emitterId }` | Handshake complete — re-announce subscriptions (`emitterId` is `null` if SSE not yet connected) |
+| `{ type: 'worker:ready', portId }` | Handshake complete — re-announce subscriptions |
 | `{ type: 'sse:connected' }` | SSE link is up |
 | `{ type: 'sse:reconnecting' }` | SSE link dropped, auto-reconnecting |
-| `{ type: 'emitter:id', emitterId }` | Server-assigned ID for this SSE connection |
 | `{ topic, payload }` | Routed event for a subscribed topic |
 
 ---
@@ -65,17 +64,16 @@ Tab opens
         └─► onconnect fires
               ├─► portRegistry.set(portId=1, { port, topics: new Set() })
               ├─► connectSSE()               # EventSource created
-              └─► port.postMessage({ type: 'worker:ready', portId: 1, emitterId: null })
+              └─► port.postMessage({ type: 'worker:ready', portId: 1 })
 
-Tab receives worker:ready (emitterId is null — SSE not yet connected)
+Tab receives worker:ready
   └─► re-announces all active topic subscriptions to worker (none yet at this point)
 
 EventSource opens
   ├─► server sends first event: { type: 'emitter:id', emitterId: 'abc-123' }
   │     └─► worker stores currentEmitterId = 'abc-123'
-  │           └─► worker broadcasts { type: 'emitter:id', emitterId: 'abc-123' } to all ports
-  │                 └─► Tab stores emitterId, POSTs all active topics to server
-  │                       POST /api/sse/subscriptions  X-Emitter-Id: abc-123
+  │           └─► worker calls syncServerSubscriptions()
+  │                 # POSTs all topics in topicRefCount (none yet — no-op)
   └─► worker broadcasts { type: 'sse:connected' } to all ports
         └─► Tab sets isConnected = true
 ```
@@ -94,17 +92,18 @@ Tab opens
         └─► onconnect fires (same worker, new port)
               ├─► portRegistry.set(portId=2, { port, topics: new Set() })
               ├─► connectSSE()               # no-op: EventSource already open
-              └─► port.postMessage({ type: 'worker:ready', portId: 2, emitterId: 'abc-123' })
+              └─► port.postMessage({ type: 'worker:ready', portId: 2 })
 
-Tab receives worker:ready (emitterId is present — SSE already connected)
-  ├─► re-announces all active topic subscriptions to worker
-  └─► stores emitterId and POSTs all active topics to server
-        POST /api/sse/subscriptions  X-Emitter-Id: abc-123
+Tab receives worker:ready
+  └─► re-announces all active topic subscriptions to worker
+        └─► worker calls incrementTopic() for each topic
+              # if count goes 0→1: POST /api/sse/subscriptions X-Emitter-Id: abc-123
+              # if count already ≥1: no-op (another tab already registered it)
 ```
 
 No new SSE connection is created. The existing connection is reused. `portRegistry` now
-has two entries. No new `emitter:id` event arrives — the worker passes the stored one
-directly in `worker:ready`.
+has two entries. Server-side subscriptions are managed by the worker's `topicRefCount`
+— there is no need for the tab to know the `emitterId`.
 
 ---
 
@@ -114,12 +113,15 @@ Subscriptions are three-layered:
 
 **Layer 1 — `RealtimeSseService` (per tab):**
 Maintains a `Map<topic, Set<callback>>`. Multiple components in the same tab can register
-callbacks for the same topic. The worker and server are each notified only once per topic
-per tab (on the first subscriber and on the last unsubscribe).
+callbacks for the same topic. The worker is notified only once per topic per tab (on the
+first subscriber and on the last unsubscribe). The tab never calls the server directly.
 
 **Layer 2 — `sse-worker.js` (shared):**
-Maintains a `Set<topic>` per port. When an SSE event arrives, it routes the raw payload
-to every port that has subscribed to that topic.
+Maintains a `Set<topic>` per port for routing and a global `topicRefCount` map across all
+ports. When an SSE event arrives, it routes the raw payload to every port that has
+subscribed to that topic. The worker calls the server REST API when `topicRefCount` goes
+from 0 to 1 (POST) or from 1 to 0 (DELETE), ensuring the server is notified only once
+regardless of how many tabs are listening.
 
 **Layer 3 — Server (`SseEmitterService`):**
 Maintains a `Set<topic>` per emitter. `publish()` skips emitters that have not subscribed
@@ -129,15 +131,17 @@ to the topic, avoiding unnecessary SSE traffic when the user navigates away from
 Component A subscribes to "folder:123"
   └─► RealtimeSseService.subscribe("folder:123", cbA)
         ├─► callbacks.set("folder:123", Set{ cbA })
-        ├─► worker ← { type: 'subscribe', topic: 'folder:123' }
-        │     └─► portRegistry[portId].topics.add("folder:123")
-        └─► POST /api/sse/subscriptions  X-Emitter-Id: abc-123  { topic: "folder:123" }
-              └─► server: emitterTopics["abc-123"].add("folder:123")
+        └─► worker ← { type: 'subscribe', topic: 'folder:123' }
+              ├─► portRegistry[portId].topics.add("folder:123")
+              └─► incrementTopic("folder:123")
+                    # topicRefCount: 0→1 → POST /api/sse/subscriptions
+                    #   X-Emitter-Id: abc-123  { topic: "folder:123" }
+                    #   server: emitterTopics["abc-123"].add("folder:123")
 
 Component B (same tab) subscribes to "folder:123"
   └─► RealtimeSseService.subscribe("folder:123", cbB)
         ├─► callbacks.get("folder:123").add(cbB)   # Set{ cbA, cbB }
-        └─► worker and server NOT notified (topic already registered for this tab)
+        └─► worker NOT notified (topic already registered for this tab)
 
 SSE event arrives: { topic: "folder:123", payload: { ... } }
   └─► worker routes to all ports subscribed to "folder:123"
@@ -152,20 +156,23 @@ SSE event arrives: { topic: "folder:123", payload: { ... } }
 ```
 Component A unsubscribes
   └─► RealtimeSseService.removeCallback("folder:123", cbA)
-        └─► callbacks["folder:123"] = Set{ cbB }   # cbB still there, no worker/server message
+        └─► callbacks["folder:123"] = Set{ cbB }   # cbB still there, no worker message
 
 Component B unsubscribes (last callback for this topic)
   └─► RealtimeSseService.removeCallback("folder:123", cbB)
         ├─► callbacks.delete("folder:123")          # map entry removed
-        ├─► worker ← { type: 'unsubscribe', topic: 'folder:123' }
-        │     └─► portRegistry[portId].topics.delete("folder:123")
-        └─► DELETE /api/sse/subscriptions  X-Emitter-Id: abc-123  { topic: "folder:123" }
-              └─► server: emitterTopics["abc-123"].delete("folder:123")
+        └─► worker ← { type: 'unsubscribe', topic: 'folder:123' }
+              ├─► portRegistry[portId].topics.delete("folder:123")
+              └─► decrementTopic("folder:123")
+                    # topicRefCount: 1→0 → DELETE /api/sse/subscriptions
+                    #   X-Emitter-Id: abc-123  { topic: "folder:123" }
+                    #   server: emitterTopics["abc-123"].delete("folder:123")
+                    # if another tab still has topicRefCount ≥ 1 → no DELETE sent
 ```
 
-Events for `folder:123` will no longer be delivered to this tab, and the server will stop
-publishing them to this emitter entirely. Other tabs/browsers with their own subscriptions
-to the same topic are unaffected.
+Events for `folder:123` will no longer be delivered to this tab. The server DELETE is only
+sent when no other tab is still subscribed to the topic — if another tab is listening, the
+server subscription remains active and that tab continues to receive events unaffected.
 
 In Ember, `registerDestructor` is used to call `unsubscribe()` automatically when a
 component is destroyed (e.g. removed from the DOM). The service itself is
@@ -231,20 +238,21 @@ EventSource encounters error (network drop, server restart, etc.)
                           (worker-side topic sets were never cleared)
 ```
 
-Worker-side topic sets in `portRegistry` survive the SSE reconnect intact — no
-re-subscription messages to the worker are needed.
+Worker-side topic sets in `portRegistry` and `topicRefCount` survive the SSE reconnect
+intact — no re-subscription messages to the worker are needed.
 
 The server, however, creates a **new emitter** on reconnect, so the old `emitterId` and
-its topic set are gone. The server sends a fresh `emitter:id` event, which the worker
-broadcasts to all ports. Each tab receives it, stores the new `emitterId`, and re-POSTs
-all active topics to the server.
+its topic set are gone. The server sends a fresh `emitter:id` event. The worker stores the
+new `emitterId` and immediately re-registers all topics from `topicRefCount` with the
+server — tabs are not involved.
 
 ```
 EventSource reconnects
   └─► server creates new emitter → sends { type: 'emitter:id', emitterId: 'xyz-456' }
-        └─► worker stores currentEmitterId = 'xyz-456', broadcasts to all ports
-              └─► each Tab: stores new emitterId, POSTs all active topics
-                    POST /api/sse/subscriptions  X-Emitter-Id: xyz-456
+        └─► worker stores currentEmitterId = 'xyz-456'
+              └─► syncServerSubscriptions()
+                    # POSTs each topic in topicRefCount to the server
+                    POST /api/sse/subscriptions  X-Emitter-Id: xyz-456  { topic: "..." }
 ```
 
 > **Note:** Events that fired on the server during the disconnection window are lost.
@@ -270,7 +278,6 @@ hitting the logout endpoint:
 ```
 User logs out
   └─► RealtimeSseService.disconnect()
-        ├─► emitterId = null         # clear stale emitter ID
         └─► worker ← { type: 'disconnect-sse' }
               ├─► currentEmitterId = null
               └─► disconnectSSE()   # EventSource closed cleanly, no auto-reconnect
@@ -294,13 +301,15 @@ User logs in
               ├─► disconnectSSE()   # no-op: already closed at logout
               └─► connectSSE()      # new EventSource opened with fresh session cookie
                     └─► server sends { type: 'emitter:id', emitterId: 'xyz-456' }
-                          └─► worker broadcasts to all ports
-                                └─► each Tab: stores new emitterId, re-POSTs active topics
+                          └─► worker stores currentEmitterId = 'xyz-456'
+                                └─► syncServerSubscriptions()
+                                      # re-POSTs all topics in topicRefCount
                                       POST /api/sse/subscriptions  X-Emitter-Id: xyz-456
 ```
 
-Worker-side topic sets in `portRegistry` are untouched across both steps. Server-side
-subscriptions are restored automatically when the new `emitter:id` arrives.
+Worker-side topic sets in `portRegistry` and `topicRefCount` are untouched across both
+steps. Server-side subscriptions are restored automatically when the new `emitter:id`
+arrives — tabs are not involved.
 
 ---
 
@@ -335,11 +344,15 @@ routeToSubscribers / broadcastToAll
   └─► port.postMessage throws
         └─► portId added to dead[] list
               └─► removePort(portId) called after iteration
-                    └─► portRegistry.delete(portId)
-                          └─► if empty → disconnectSSE()
+                    ├─► for each topic in portRegistry[portId].topics:
+                    │     decrementTopic(topic)
+                    │       # topicRefCount 1→0 → DELETE /api/sse/subscriptions
+                    ├─► portRegistry.delete(portId)
+                    └─► if empty → disconnectSSE()
 ```
 
-This ensures stale ports never accumulate in the registry.
+This ensures stale ports never accumulate in the registry and server-side subscriptions
+are cleaned up even when a tab crashes without sending `disconnect`.
 
 ---
 
