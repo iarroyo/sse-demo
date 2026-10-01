@@ -42,8 +42,7 @@ function connectSSE() {
   eventSource = new EventSource('/api/sse/connect', { withCredentials: true });
 
   eventSource.onopen = () => {
-    console.debug('[SSEWorker] SSE connected');
-    broadcastToAll({ type: 'sse:connected' });
+    console.debug('[SSEWorker] SSE transport open — waiting for emitter:id');
   };
 
   eventSource.onmessage = (event) => {
@@ -53,6 +52,7 @@ function connectSSE() {
         currentEmitterId = message.emitterId;
         console.debug('[SSEWorker] Emitter ID received:', currentEmitterId);
         syncServerSubscriptions();
+        broadcastToAll({ type: 'sse:connected' });
         return;
       }
       if (message.topic && message.payload !== undefined) {
@@ -233,4 +233,9 @@ self.onconnect = (connectEvent) => {
 
   port.start();
   port.postMessage({ type: 'worker:ready', portId });
+
+  // SSE already fully established — notify this port directly
+  if (currentEmitterId) {
+    port.postMessage({ type: 'sse:connected' });
+  }
 };
