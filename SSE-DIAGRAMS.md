@@ -26,7 +26,6 @@ sequenceDiagram
     Worker->>Worker: currentEmitterId = "abc-123"
     Worker-->>Tab: { type: "emitter:id", emitterId: "abc-123" }
     Tab->>Tab: store emitterId = "abc-123"
-    Note over Tab: POST active topics to server (none yet)
 
     Worker-->>Tab: { type: "sse:connected" }
     Tab->>Tab: isConnected = true
