@@ -168,7 +168,8 @@ publishing them to this emitter entirely. Other tabs/browsers with their own sub
 to the same topic are unaffected.
 
 In Ember, `registerDestructor` is used to call `unsubscribe()` automatically when a
-component or route is destroyed (navigation away, component teardown).
+component is destroyed (e.g. removed from the DOM). The service itself is
+application-scoped and is not destroyed on route transitions.
 
 ---
 
@@ -176,12 +177,13 @@ component or route is destroyed (navigation away, component teardown).
 
 There are two distinct paths depending on how the tab exits.
 
-**In-app navigation (Ember route teardown):**
-Ember destroys services and components as part of the route lifecycle. `registerDestructor`
-fires, which runs `teardown()` explicitly:
+**Programmatic app teardown (`app.destroy()`, test teardown):**
+`RealtimeSseService` is application-scoped — it survives route transitions and is only
+destroyed when the Ember application itself is torn down. When that happens,
+`registerDestructor` fires and runs `teardown()` explicitly:
 
 ```
-Ember app / service destroyed
+Ember application destroyed
   └─► RealtimeSseService.teardown()
         ├─► worker ← { type: 'disconnect' }
         │     └─► portRegistry.delete(portId)
@@ -189,7 +191,10 @@ Ember app / service destroyed
         └─► worker.port.close()
 ```
 
-**Hard tab close or browser kill (Ctrl+W, crash, process termination):**
+In practice this path is rarely hit in a normal user session. Route transitions, navigating
+to another page within the app, and closing the tab do not trigger it.
+
+**Hard tab close, external navigation, or browser kill (Ctrl+W, crash, process termination):**
 The JavaScript context is destroyed by the browser with no opportunity to run code.
 `teardown()` never executes and no `disconnect` message is ever sent. The worker only
 discovers the port is gone the next time it attempts to write to it — either on the next
