@@ -22,7 +22,6 @@ export type Unsubscribe = () => void;
 export default class RealtimeSseService extends Service {
   @tracked isConnected = false;
   @tracked isReconnecting = false;
-  @tracked activeTopicCount = 0;
 
   private worker: SharedWorker | null = null;
   /** topic -> set of callbacks registered in this tab */
@@ -123,7 +122,6 @@ export default class RealtimeSseService extends Service {
   subscribe(topic: string, callback: SseCallback): Unsubscribe {
     if (!this.callbacks.has(topic)) {
       this.callbacks.set(topic, new Set());
-      this.activeTopicCount = this.callbacks.size;
       this.worker?.port.postMessage({ type: 'subscribe', topic });
     }
     this.callbacks.get(topic)!.add(callback);
@@ -142,7 +140,6 @@ export default class RealtimeSseService extends Service {
     cbs.delete(callback);
     if (cbs.size === 0) {
       this.callbacks.delete(topic);
-      this.activeTopicCount = this.callbacks.size;
       this.worker?.port.postMessage({ type: 'unsubscribe', topic });
     }
   }
