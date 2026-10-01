@@ -5,7 +5,7 @@ written descriptions.
 
 ---
 
-## 1. First Tab — Connection & Emitter ID
+## 1. First Tab - Connection & Emitter ID
 
 No SharedWorker exists yet. The browser spawns a fresh process, opens the SSE connection,
 and the server assigns an emitter ID.
@@ -14,7 +14,7 @@ and the server assigns an emitter ID.
 sequenceDiagram
     participant Tab
     participant Worker as SharedWorker
-    participant Server as Spring Boot
+    participant Server as BFF
 
     Tab->>Worker: new SharedWorker()
     Worker->>Worker: portRegistry.set(portId=1, topics=∅)
@@ -26,7 +26,6 @@ sequenceDiagram
     Worker->>Worker: currentEmitterId = "abc-123"
     Worker-->>Tab: { type: "emitter:id", emitterId: "abc-123" }
     Tab->>Tab: store emitterId = "abc-123"
-    Note over Tab: POST active topics to server (none yet)
 
     Worker-->>Tab: { type: "sse:connected" }
     Tab->>Tab: isConnected = true
@@ -34,7 +33,7 @@ sequenceDiagram
 
 ---
 
-## 2. Second Tab — Reusing the Existing Worker
+## 2. Second Tab - Reusing the Existing Worker
 
 The SharedWorker is already running. No new SSE connection is created. The stored
 `emitterId` is passed directly in `worker:ready`.
@@ -44,7 +43,7 @@ sequenceDiagram
     participant TabA as Tab A (existing)
     participant Worker as SharedWorker
     participant TabB as Tab B (new)
-    participant Server as Spring Boot
+    participant Server as BFF
 
     Note over Worker: SSE already open, currentEmitterId = "abc-123"
 
@@ -69,7 +68,7 @@ sequenceDiagram
     participant Comp as Component
     participant Service as RealtimeSseService
     participant Worker as SharedWorker
-    participant Server as Spring Boot
+    participant Server as BFF
 
     Comp->>Service: subscribe("folder:123", callback)
     Note over Service: First subscriber for this topic in this tab
@@ -89,7 +88,7 @@ sequenceDiagram
 
 ## 4. Unsubscribing From a Topic
 
-The last component for a topic unsubscribes — both the worker and server are notified.
+The last component for a topic unsubscribes - both the worker and server are notified.
 
 ```mermaid
 sequenceDiagram
@@ -97,12 +96,12 @@ sequenceDiagram
     participant CompB as Component B
     participant Service as RealtimeSseService
     participant Worker as SharedWorker
-    participant Server as Spring Boot
+    participant Server as BFF
 
     CompA->>Service: unsubscribe() [callback A]
-    Note over Service: callbacks["folder:123"] still has B — no worker/server message
+    Note over Service: callbacks["folder:123"] still has B - no worker/server message
 
-    CompB->>Service: unsubscribe() [callback B — last subscriber]
+    CompB->>Service: unsubscribe() [callback B - last subscriber]
     Service->>Worker: { type: "unsubscribe", topic: "folder:123" }
     Worker->>Worker: portRegistry[portId].topics.delete("folder:123")
     Service->>Server: DELETE /api/sse/subscriptions { topic: "folder:123" }<br/>X-Emitter-Id: abc-123
@@ -120,7 +119,7 @@ and topics are re-registered with the server.
 sequenceDiagram
     participant Tab
     participant Worker as SharedWorker
-    participant Server as Spring Boot
+    participant Server as BFF
 
     Server-xWorker: SSE connection drops (network / server restart)
     Worker->>Worker: eventSource.onerror fires
@@ -150,13 +149,13 @@ assigned after successful re-authentication.
 sequenceDiagram
     participant Tab
     participant Worker as SharedWorker
-    participant Server as Spring Boot
+    participant Server as BFF
 
     Note over Tab: User clicks logout
     Tab->>Tab: emitterId = null
     Tab->>Worker: { type: "disconnect-sse" }
     Worker->>Worker: currentEmitterId = null
-    Worker->>Worker: disconnectSSE() — EventSource closed, no auto-reconnect
+    Worker->>Worker: disconnectSSE() - EventSource closed, no auto-reconnect
 
     Tab->>Server: POST /api/auth/logout
     Note over Server: Session invalidated<br/>emitter removed, topic set deleted
@@ -179,7 +178,7 @@ sequenceDiagram
 
 ---
 
-## 7. Hard Tab Close — Dead Port Detection
+## 7. Hard Tab Close - Dead Port Detection
 
 The tab is killed with no opportunity to run code. The worker discovers the dead port
 passively on the next write attempt.
@@ -188,16 +187,16 @@ passively on the next write attempt.
 sequenceDiagram
     participant Tab
     participant Worker as SharedWorker
-    participant Server as Spring Boot
+    participant Server as BFF
 
-    Note over Tab: Tab killed (Ctrl+W, crash, process termination)<br/>No JS runs — disconnect never sent
+    Note over Tab: Tab killed (Ctrl+W, crash, process termination)<br/>No JS runs - disconnect never sent
 
     Note over Worker: portRegistry still holds the dead port
 
     Server-->>Worker: SSE event or heartbeat
     Worker->>Tab: port.postMessage(...) throws
     Worker->>Worker: dead.push(portId)
-    Worker->>Worker: removePort(portId) — portRegistry.delete(portId)
+    Worker->>Worker: removePort(portId) - portRegistry.delete(portId)
 
     alt Last port removed
         Worker->>Worker: disconnectSSE()
