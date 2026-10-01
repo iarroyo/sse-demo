@@ -35,10 +35,11 @@ tasks.register('dev') {
             vite.destroyForcibly()
         }))
 
-        project.exec {
-            workingDir 'backend'
-            commandLine './gradlew', 'bootRun'
-        }
+        new ProcessBuilder('./gradlew', 'bootRun')
+                .directory(file('backend'))
+                .inheritIO()
+                .start()
+                .waitFor()
     }
 }
 
@@ -50,9 +51,10 @@ tasks.register('devNginx') {
     doLast {
         def nginxConf = file('nginx/sse-cf-sim.conf').absolutePath
 
-        project.exec {
-            commandLine 'nginx', '-c', nginxConf
-        }
+        new ProcessBuilder('nginx', '-c', nginxConf)
+                .inheritIO()
+                .start()
+                .waitFor()
 
         Runtime.runtime.addShutdownHook(new Thread({
             new ProcessBuilder('nginx', '-s', 'quit', '-c', nginxConf)
@@ -67,9 +69,10 @@ tasks.register('devNginx') {
             vite.destroyForcibly()
         }))
 
-        project.exec {
-            workingDir 'backend'
-            commandLine './gradlew', 'bootRun'
-        }
+        new ProcessBuilder('./gradlew', 'bootRun')
+                .directory(file('backend'))
+                .inheritIO()
+                .start()
+                .waitFor()
     }
 }
