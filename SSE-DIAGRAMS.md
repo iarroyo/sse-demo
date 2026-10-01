@@ -19,16 +19,17 @@ sequenceDiagram
     Tab->>Worker: new SharedWorker()
     Worker->>Worker: portRegistry.set(portId=1, topics=∅)
     Worker->>Server: GET /api/sse/connect (EventSource)
-    Worker-->>Tab: worker:ready { portId: 1, emitterId: null }
+    Worker-->>Tab: worker:ready { portId: 1 }
     Note over Tab: No subscriptions to announce yet
 
-    Server-->>Worker: SSE: { type: "emitter:id", emitterId: "abc-123" }
-    Worker->>Worker: currentEmitterId = "abc-123"
-    Worker-->>Tab: { type: "emitter:id", emitterId: "abc-123" }
-    Tab->>Tab: store emitterId = "abc-123"
-
+    Note over Worker: eventSource.onopen fires
     Worker-->>Tab: { type: "sse:connected" }
     Tab->>Tab: isConnected = true
+
+    Note over Worker: eventSource.onmessage fires
+    Server-->>Worker: SSE: { type: "emitter:id", emitterId: "abc-123" }
+    Worker->>Worker: currentEmitterId = "abc-123"
+    Worker->>Worker: syncServerSubscriptions() - no-op (topicRefCount empty)
 ```
 
 ---
@@ -132,13 +133,16 @@ sequenceDiagram
 
     Worker->>Server: GET /api/sse/connect (EventSource auto-reconnect)
     Note over Server: New emitter created<br/>old emitter + topic set discarded
+
+    Note over Worker: eventSource.onopen fires
+    Worker-->>Tab: { type: "sse:connected" }
+    Tab->>Tab: isConnected = true, isReconnecting = false
+
+    Note over Worker: eventSource.onmessage fires
     Server-->>Worker: SSE: { type: "emitter:id", emitterId: "xyz-456" }
     Worker->>Worker: currentEmitterId = "xyz-456"
     Worker->>Worker: syncServerSubscriptions()
     Worker->>Server: POST /api/sse/subscriptions per topic in topicRefCount<br/>X-Emitter-Id: xyz-456
-
-    Worker-->>Tab: { type: "sse:connected" }
-    Tab->>Tab: isConnected = true, isReconnecting = false
 ```
 
 ---
@@ -168,13 +172,16 @@ sequenceDiagram
 
     Tab->>Worker: { type: "connect-sse" }
     Worker->>Server: GET /api/sse/connect (new EventSource, fresh cookie)
+
+    Note over Worker: eventSource.onopen fires
+    Worker-->>Tab: { type: "sse:connected" }
+    Tab->>Tab: isConnected = true
+
+    Note over Worker: eventSource.onmessage fires
     Server-->>Worker: SSE: { type: "emitter:id", emitterId: "xyz-456" }
     Worker->>Worker: currentEmitterId = "xyz-456"
     Worker->>Worker: syncServerSubscriptions()
     Worker->>Server: POST /api/sse/subscriptions per topic in topicRefCount<br/>X-Emitter-Id: xyz-456
-
-    Worker-->>Tab: { type: "sse:connected" }
-    Tab->>Tab: isConnected = true
 ```
 
 ---
