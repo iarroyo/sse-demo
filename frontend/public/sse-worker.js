@@ -191,7 +191,7 @@ self.onconnect = (connectEvent) => {
 
     switch (type) {
       case 'subscribe':
-        if (topic) {
+        if (topic && !entry.topics.has(topic)) {
           entry.topics.add(topic);
           incrementTopic(topic);
           console.debug(`[SSEWorker] Port ${portId} subscribed to "${topic}"`);
