@@ -34,17 +34,16 @@ When a user opens the first tab of the application, no SharedWorker is running y
 
 1. The browser spawns a fresh SharedWorker process, which triggers its internal connection logic.
 2. The worker registers the new tab's communication port into an internal map (portRegistry) and spins up the main EventSource connection to the backend.
-3. The worker sends a worker:ready handshake back to the tab with `emitterId: null` because the SSE connection is not yet established.
-4. Once the backend connection opens, the server sends an emitter:id event containing a UUID that identifies this specific SSE connection. The worker stores it and forwards it to all ports.
-5. The tab receives the emitter:id, stores it locally, and POSTs all its active topic subscriptions to the server using that ID as a header.
-6. The worker also broadcasts an sse:connected message, prompting the tab to toggle its internal connection status to active.
+3. The worker sends a worker:ready handshake back to the tab. The SSE transport opens (onopen), but the connection is not yet considered ready.
+4. The server sends an emitter:id event as the first SSE frame. The worker stores the UUID, re-registers all active topics with the server via syncServerSubscriptions, and only then broadcasts sse:connected to all ports.
+5. The tab receives sse:connected and sets its internal connection status to active. At this point the emitter exists on the server and subscriptions can be registered.
 
 **2\. Opening Subsequent Tabs**
 
 When additional tabs are opened under the same origin, the browser recognizes that a SharedWorker is already active and reuses the existing process.
 
 1. The worker registers the new tab's port alongside the existing ones, but it skips creating a new EventSource connection because the network link is already open.
-2. The worker sends a worker:ready signal exclusively to the new tab. The SSE connection is already open, so no new emitter:id event is needed.
+2. The worker sends a worker:ready signal exclusively to the new tab. Because currentEmitterId is already set, the worker also immediately sends sse:connected to the new port — the tab does not need to wait for onopen or a new emitter:id event.
 3. The new tab responds by announcing its active topic subscriptions to the worker. The worker increments `topicRefCount` for each topic and sends a POST to the server only for topics that cross from 0 to 1 — topics already subscribed by another tab are skipped.
 
 **3\. Subscription Management**
