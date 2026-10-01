@@ -7,15 +7,14 @@
  * Port message protocol:
  *   { type: 'subscribe',   topic: string }       → register interest in a topic
  *   { type: 'unsubscribe', topic: string }       → deregister interest
- *   { type: 'disconnect' }                       → port is closing (tab navigation/close)
+ *   { type: 'disconnect' }                       → port is closing (Ember app teardown)
  *   { type: 'disconnect-sse' }                   → close SSE connection (on logout)
  *   { type: 'connect-sse' }                      → establish SSE connection (after re-login)
  *
  * Worker → port messages:
- *   { type: 'worker:ready', portId: number, emitterId: string|null } → handshake complete
+ *   { type: 'worker:ready', portId: number }     → handshake complete
  *   { type: 'sse:connected' }                    → SSE link up
  *   { type: 'sse:reconnecting' }                 → SSE link dropped, auto-reconnecting
- *   { type: 'emitter:id', emitterId: string }    → server-assigned emitter ID
  *   { topic: string, payload: object }           → event routed to subscriber
  */
 
@@ -28,6 +27,10 @@ let eventSource = null;
 
 /** @type {string | null} */
 let currentEmitterId = null;
+
+/** Global topic reference count across all ports — used to sync with the server.
+ *  @type {Map<string, number>} */
+const topicRefCount = new Map();
 
 // ---------------------------------------------------------------------------
 // SSE lifecycle
@@ -48,7 +51,8 @@ function connectSSE() {
       const message = JSON.parse(event.data);
       if (message.type === 'emitter:id') {
         currentEmitterId = message.emitterId;
-        broadcastToAll({ type: 'emitter:id', emitterId: currentEmitterId });
+        console.debug('[SSEWorker] Emitter ID received:', currentEmitterId);
+        syncServerSubscriptions();
         return;
       }
       if (message.topic && message.payload !== undefined) {
@@ -70,6 +74,55 @@ function disconnectSSE() {
     eventSource.close();
     eventSource = null;
     console.debug('[SSEWorker] SSE disconnected');
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Server subscription sync
+// ---------------------------------------------------------------------------
+
+function serverSubscribe(topic) {
+  if (!currentEmitterId) return;
+  fetch('/api/sse/subscriptions', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', 'X-Emitter-Id': currentEmitterId },
+    body: JSON.stringify({ topic }),
+    credentials: 'include',
+  }).catch((err) => console.error(`[SSEWorker] Failed to subscribe topic "${topic}":`, err));
+}
+
+function serverUnsubscribe(topic) {
+  if (!currentEmitterId) return;
+  fetch('/api/sse/subscriptions', {
+    method: 'DELETE',
+    headers: { 'Content-Type': 'application/json', 'X-Emitter-Id': currentEmitterId },
+    body: JSON.stringify({ topic }),
+    credentials: 'include',
+  }).catch((err) => console.error(`[SSEWorker] Failed to unsubscribe topic "${topic}":`, err));
+}
+
+function incrementTopic(topic) {
+  const count = (topicRefCount.get(topic) ?? 0) + 1;
+  topicRefCount.set(topic, count);
+  if (count === 1) {
+    serverSubscribe(topic);
+  }
+}
+
+function decrementTopic(topic) {
+  const count = (topicRefCount.get(topic) ?? 0) - 1;
+  if (count <= 0) {
+    topicRefCount.delete(topic);
+    serverUnsubscribe(topic);
+  } else {
+    topicRefCount.set(topic, count);
+  }
+}
+
+/** Re-register all currently active topics with a freshly assigned emitter. */
+function syncServerSubscriptions() {
+  for (const topic of topicRefCount.keys()) {
+    serverSubscribe(topic);
   }
 }
 
@@ -104,6 +157,12 @@ function broadcastToAll(message) {
 }
 
 function removePort(portId) {
+  const entry = portRegistry.get(portId);
+  if (entry) {
+    for (const topic of entry.topics) {
+      decrementTopic(topic);
+    }
+  }
   portRegistry.delete(portId);
   console.debug(`[SSEWorker] Port ${portId} removed. Active ports: ${portRegistry.size}`);
   if (portRegistry.size === 0) {
@@ -134,6 +193,7 @@ self.onconnect = (connectEvent) => {
       case 'subscribe':
         if (topic) {
           entry.topics.add(topic);
+          incrementTopic(topic);
           console.debug(`[SSEWorker] Port ${portId} subscribed to "${topic}"`);
         }
         break;
@@ -141,6 +201,7 @@ self.onconnect = (connectEvent) => {
       case 'unsubscribe':
         if (topic) {
           entry.topics.delete(topic);
+          decrementTopic(topic);
           console.debug(`[SSEWorker] Port ${portId} unsubscribed from "${topic}"`);
         }
         break;
@@ -171,5 +232,5 @@ self.onconnect = (connectEvent) => {
   };
 
   port.start();
-  port.postMessage({ type: 'worker:ready', portId, emitterId: currentEmitterId });
+  port.postMessage({ type: 'worker:ready', portId });
 };
