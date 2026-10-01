@@ -70,17 +70,21 @@ Tab receives worker:ready
   └─► re-announces all active topic subscriptions to worker (none yet at this point)
 
 EventSource opens
-  ├─► server sends first event: { type: 'emitter:id', emitterId: 'abc-123' }
-  │     └─► worker stores currentEmitterId = 'abc-123'
-  │           └─► worker calls syncServerSubscriptions()
-  │                 # POSTs all topics in topicRefCount (none yet — no-op)
-  └─► worker broadcasts { type: 'sse:connected' } to all ports
-        └─► Tab sets isConnected = true
+  └─► eventSource.onopen fires
+        └─► worker broadcasts { type: 'sse:connected' } to all ports
+              └─► Tab sets isConnected = true
+
+Server sends first SSE frame
+  └─► eventSource.onmessage fires: { type: 'emitter:id', emitterId: 'abc-123' }
+        └─► worker stores currentEmitterId = 'abc-123'
+              └─► worker calls syncServerSubscriptions()
+                    # POSTs all topics in topicRefCount (none yet — no-op)
 ```
 
-The worker process is now alive. `portRegistry` has one entry. One SSE connection is open
-to the backend. The server has registered the emitter and is ready to filter events by
-subscription.
+`onopen` always fires before the first `onmessage` — `sse:connected` is broadcast before
+`emitter:id` is received. The worker process is now alive. `portRegistry` has one entry.
+One SSE connection is open to the backend. The server has registered the emitter and is
+ready to filter events by subscription.
 
 ---
 
@@ -248,7 +252,12 @@ server — tabs are not involved.
 
 ```
 EventSource reconnects
-  └─► server creates new emitter → sends { type: 'emitter:id', emitterId: 'xyz-456' }
+  └─► eventSource.onopen fires
+        └─► worker broadcasts { type: 'sse:connected' } to all ports
+              └─► each Tab sets isConnected = true, isReconnecting = false
+
+Server sends first SSE frame on the new connection
+  └─► eventSource.onmessage fires: { type: 'emitter:id', emitterId: 'xyz-456' }
         └─► worker stores currentEmitterId = 'xyz-456'
               └─► syncServerSubscriptions()
                     # POSTs each topic in topicRefCount to the server
@@ -300,7 +309,12 @@ User logs in
               ├─► currentEmitterId = null
               ├─► disconnectSSE()   # no-op: already closed at logout
               └─► connectSSE()      # new EventSource opened with fresh session cookie
-                    └─► server sends { type: 'emitter:id', emitterId: 'xyz-456' }
+                    └─► eventSource.onopen fires
+                          └─► worker broadcasts { type: 'sse:connected' } to all ports
+                                └─► Tab sets isConnected = true
+
+                    Server sends first SSE frame
+                    └─► eventSource.onmessage fires: { type: 'emitter:id', emitterId: 'xyz-456' }
                           └─► worker stores currentEmitterId = 'xyz-456'
                                 └─► syncServerSubscriptions()
                                       # re-POSTs all topics in topicRefCount
