@@ -40,36 +40,50 @@ RealtimeSseService     RealtimeSseService
 
 ## Running
 
-### 1 — Backend
+Everything is started from the project root with the Gradle wrapper. Both
+tasks run `npm install` in `frontend/` first (skipped when up to date), then
+start the Vite dev server in the background and Spring Boot in the foreground.
+**Ctrl+C stops everything.**
+
+### Direct mode (default)
 ```bash
-cd backend
-./mvnw spring-boot:run
-# Starts on http://localhost:8080
+./gradlew dev
 ```
 
-### 2 — Nginx (CloudFront timeout simulator)
-```bash
-# macOS
-brew install nginx
-
-# Start with the project config (standalone, no root needed)
-nginx -c $(pwd)/nginx/sse-cf-sim.conf
-
-# Stop
-nginx -c $(pwd)/nginx/sse-cf-sim.conf -s stop
+```
+Browser → Vite :4200 → /api → Spring Boot :8080
 ```
 
-Nginx listens on `:9090` and forwards to Spring Boot `:8080` with a
+### Through Nginx (CloudFront timeout simulator)
+Requires `nginx` on your `PATH` (macOS: `brew install nginx`).
+
+```bash
+./gradlew devNginx
+```
+
+```
+Browser → Vite :4200 → /api → Nginx :9090 → Spring Boot :8080
+```
+
+Nginx is started with [nginx/sse-cf-sim.conf](nginx/sse-cf-sim.conf) and
+stopped automatically on exit. It forwards to Spring Boot with a
 **60-second `proxy_read_timeout`** — the same idle-byte timeout CloudFront
-applies in production.
+applies in production. Use this mode to validate the heartbeat (below).
 
-### 3 — Frontend
+Open the app at http://localhost:4200.
+
+### Running pieces individually
 ```bash
-cd frontend
-npm install
-npm start
-# Dev server on http://localhost:4200
-# Vite proxy: /api → localhost:9090 (Nginx) → localhost:8080 (Spring Boot)
+# Backend — http://localhost:8080
+cd backend && ./gradlew bootRun
+
+# Frontend — http://localhost:4200
+# BACKEND_PORT sets the Vite /api proxy target (default 8080; use 9090 for Nginx)
+cd frontend && npm install && BACKEND_PORT=8080 npm start
+
+# Nginx — :9090
+nginx -c $(pwd)/nginx/sse-cf-sim.conf           # start
+nginx -c $(pwd)/nginx/sse-cf-sim.conf -s stop   # stop
 ```
 
 ## Validating the heartbeat
@@ -81,7 +95,7 @@ To confirm it works:
 
 | Step | What to do | Expected result |
 |---|---|---|
-| **Baseline** | Open app, log in, watch browser DevTools → Network → SSE stream | Heartbeat comments arrive every ~25 s |
+| **Baseline** | Start with `./gradlew devNginx`, open app, log in, watch browser DevTools → Network → SSE stream | Heartbeat comments arrive every ~25 s |
 | **Simulate timeout** | Comment out `@Scheduled` in `SseEmitterService`, restart backend | After 60 s Nginx drops the connection; browser EventSource reconnects (you'll see a new SSE request) |
 | **Re-enable heartbeat** | Uncomment `@Scheduled`, restart backend | Connection stays open indefinitely; no reconnects |
 
@@ -92,12 +106,4 @@ tail -f /usr/local/var/log/nginx/error.log
 
 # or (Apple Silicon)
 tail -f /opt/homebrew/var/log/nginx/error.log
-```
-
-## Skipping Nginx (direct mode)
-
-If you want to run without Nginx, change the proxy target in
-`frontend/vite.config.mjs`:
-```js
-target: 'http://localhost:8080',  // direct to Spring Boot
 ```
