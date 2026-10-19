@@ -11,11 +11,13 @@ Browser Tab A          Browser Tab B
      │                      │
      ▼                      ▼
 RealtimeSseService     RealtimeSseService
-     │    subscribe(topic, cb)
+     │    subscribe({ eventName, resourceId }, cb)
      └────────┐    ┌────────┘
               ▼    ▼
           SharedWorker (sse-worker.js)
           - One SSE connection per browser
+          - Ref-counts topics across tabs, syncs with
+            POST/DELETE /api/sse/subscriptions
           - Routes events to subscribed ports
                 │
                 │ EventSource /api/sse/connect (session cookie)
@@ -25,7 +27,55 @@ RealtimeSseService     RealtimeSseService
                 ▼
           Spring Boot :8080
           - Per-user SseEmitter map
+          - Per-emitter topic subscriptions
           - Heartbeat every 25 s keeps timeout from firing
+```
+
+## Topics
+
+A topic is a JSON object with two properties:
+
+| Property | Required | Description |
+|---|---|---|
+| `eventName` | yes | Kind of event stream, e.g. `folder` or `notifications` |
+| `resourceId` | no | Identifier of the resource the stream is about (e.g. the folder id) |
+
+Topics in use:
+
+| Topic | Events |
+|---|---|
+| `{ "eventName": "folder", "resourceId": "<folderId>" }` | `DOCUMENT_CREATED`, `DOCUMENT_DELETED` in that folder |
+| `{ "eventName": "notifications" }` | `FOLDER_SHARED`, `DOCUMENT_CREATED_NOTIFICATION` for the current user |
+
+Topics never contain a userId. The server works out the user from the session
+cookie and only sends an event to that user's emitters, so every user can
+subscribe to the same `notifications` topic and still only get their own
+events.
+
+**Subscribing:** the SharedWorker calls these endpoints with the topic as
+the JSON body and the connection's `X-Emitter-Id` header:
+
+```http
+POST   /api/sse/subscriptions   { "eventName": "folder", "resourceId": "abc" }
+DELETE /api/sse/subscriptions   { "eventName": "folder", "resourceId": "abc" }
+```
+
+**Events:** each SSE `message` event carries the topic next to the payload:
+
+```json
+{ "eventName": "folder", "resourceId": "abc", "payload": { "type": "DOCUMENT_CREATED", "...": "..." } }
+```
+
+For `notifications`, `resourceId` is `null`.
+
+**In Ember:**
+
+```ts
+const unsub = this.realtimeSse.subscribe(
+  { eventName: 'folder', resourceId: folderId },
+  (payload) => { /* ... */ },
+);
+registerDestructor(this, unsub);
 ```
 
 ## Demo Scenarios

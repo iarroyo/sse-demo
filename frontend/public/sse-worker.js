@@ -4,9 +4,13 @@
  * Central SSE connection shared across all browser tabs.
  * Bypasses the 6-connection-per-origin browser limit.
  *
+ * A topic is { eventName: string, resourceId?: string }, e.g.
+ * { eventName: 'folder', resourceId: '123' } or { eventName: 'notifications' }.
+ * The recipient user is resolved server-side from the session.
+ *
  * Port message protocol:
- *   { type: 'subscribe',   topic: string }       → register interest in a topic
- *   { type: 'unsubscribe', topic: string }       → deregister interest
+ *   { type: 'subscribe',   topic: Topic }        → register interest in a topic
+ *   { type: 'unsubscribe', topic: Topic }        → deregister interest
  *   { type: 'disconnect' }                       → port is closing (Ember app teardown)
  *   { type: 'disconnect-sse' }                   → close SSE connection (on logout)
  *   { type: 'connect-sse' }                      → establish SSE connection (after re-login)
@@ -15,10 +19,19 @@
  *   { type: 'worker:ready', portId: number }     → handshake complete
  *   { type: 'sse:connected' }                    → SSE link up
  *   { type: 'sse:reconnecting' }                 → SSE link dropped, auto-reconnecting
- *   { topic: string, payload: object }           → event routed to subscriber
+ *   { eventName, resourceId, payload }           → event routed to subscriber
  */
 
-/** @type {Map<number, { port: MessagePort, topics: Set<string> }>} */
+/** @typedef {{ eventName: string, resourceId?: string | null }} Topic */
+
+/** Stable string key for a topic, used to index Maps/Sets (objects compare by reference).
+ *  @param {Topic} topic */
+function topicKey({ eventName, resourceId }) {
+  return JSON.stringify([eventName, resourceId || null]);
+}
+
+/** Port topics are stored by topicKey.
+ *  @type {Map<number, { port: MessagePort, topics: Set<string> }>} */
 const portRegistry = new Map();
 let portCounter = 0;
 
@@ -28,8 +41,8 @@ let eventSource = null;
 /** @type {string | null} */
 let currentEmitterId = null;
 
-/** Global topic reference count across all ports — used to sync with the server.
- *  @type {Map<string, number>} */
+/** Global topic reference count across all ports, by topicKey — used to sync with the server.
+ *  @type {Map<string, { topic: Topic, count: number }>} */
 const topicRefCount = new Map();
 
 // ---------------------------------------------------------------------------
@@ -55,8 +68,8 @@ function connectSSE() {
         broadcastToAll({ type: 'sse:connected' });
         return;
       }
-      if (message.topic && message.payload !== undefined) {
-        routeToSubscribers(message.topic, message.payload);
+      if (message.eventName && message.payload !== undefined) {
+        routeToSubscribers(message, message.payload);
       }
     } catch (err) {
       console.error('[SSEWorker] Failed to parse SSE event:', err, event.data);
@@ -83,45 +96,61 @@ function disconnectSSE() {
 
 function serverSubscribe(topic) {
   if (!currentEmitterId) return;
+  const { eventName, resourceId } = topic;
   fetch('/api/sse/subscriptions', {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json', 'X-Emitter-Id': currentEmitterId },
-    body: JSON.stringify({ topic }),
+    headers: {
+      'Content-Type': 'application/json',
+      'X-Emitter-Id': currentEmitterId,
+    },
+    body: JSON.stringify({ eventName, resourceId }),
     credentials: 'include',
-  }).catch((err) => console.error(`[SSEWorker] Failed to subscribe topic "${topic}":`, err));
+  }).catch((err) =>
+    console.error(`[SSEWorker] Failed to subscribe topic ${topicKey(topic)}:`, err),
+  );
 }
 
 function serverUnsubscribe(topic) {
   if (!currentEmitterId) return;
+  const { eventName, resourceId } = topic;
   fetch('/api/sse/subscriptions', {
     method: 'DELETE',
-    headers: { 'Content-Type': 'application/json', 'X-Emitter-Id': currentEmitterId },
-    body: JSON.stringify({ topic }),
+    headers: {
+      'Content-Type': 'application/json',
+      'X-Emitter-Id': currentEmitterId,
+    },
+    body: JSON.stringify({ eventName, resourceId }),
     credentials: 'include',
-  }).catch((err) => console.error(`[SSEWorker] Failed to unsubscribe topic "${topic}":`, err));
+  }).catch((err) =>
+    console.error(`[SSEWorker] Failed to unsubscribe topic ${topicKey(topic)}:`, err),
+  );
 }
 
+/** @param {Topic} topic */
 function incrementTopic(topic) {
-  const count = (topicRefCount.get(topic) ?? 0) + 1;
-  topicRefCount.set(topic, count);
-  if (count === 1) {
+  const key = topicKey(topic);
+  const entry = topicRefCount.get(key) ?? { topic, count: 0 };
+  entry.count += 1;
+  topicRefCount.set(key, entry);
+  if (entry.count === 1) {
     serverSubscribe(topic);
   }
 }
 
-function decrementTopic(topic) {
-  const count = (topicRefCount.get(topic) ?? 0) - 1;
-  if (count <= 0) {
-    topicRefCount.delete(topic);
-    serverUnsubscribe(topic);
-  } else {
-    topicRefCount.set(topic, count);
+/** @param {string} key */
+function decrementTopic(key) {
+  const entry = topicRefCount.get(key);
+  if (!entry) return;
+  entry.count -= 1;
+  if (entry.count <= 0) {
+    topicRefCount.delete(key);
+    serverUnsubscribe(entry.topic);
   }
 }
 
 /** Re-register all currently active topics with a freshly assigned emitter. */
 function syncServerSubscriptions() {
-  for (const topic of topicRefCount.keys()) {
+  for (const { topic } of topicRefCount.values()) {
     serverSubscribe(topic);
   }
 }
@@ -130,12 +159,15 @@ function syncServerSubscriptions() {
 // Routing
 // ---------------------------------------------------------------------------
 
+/** @param {Topic} topic */
 function routeToSubscribers(topic, payload) {
+  const key = topicKey(topic);
+  const { eventName, resourceId } = topic;
   const dead = [];
   for (const [portId, { port, topics }] of portRegistry) {
-    if (topics.has(topic)) {
+    if (topics.has(key)) {
       try {
-        port.postMessage({ topic, payload });
+        port.postMessage({ eventName, resourceId, payload });
       } catch {
         dead.push(portId);
       }
@@ -159,8 +191,8 @@ function broadcastToAll(message) {
 function removePort(portId) {
   const entry = portRegistry.get(portId);
   if (entry) {
-    for (const topic of entry.topics) {
-      decrementTopic(topic);
+    for (const key of entry.topics) {
+      decrementTopic(key);
     }
   }
   portRegistry.delete(portId);
@@ -189,20 +221,22 @@ self.onconnect = (connectEvent) => {
     const entry = portRegistry.get(portId);
     if (!entry) return;
 
+    const key = topic?.eventName ? topicKey(topic) : null;
+
     switch (type) {
       case 'subscribe':
-        if (topic && !entry.topics.has(topic)) {
-          entry.topics.add(topic);
+        if (key && !entry.topics.has(key)) {
+          entry.topics.add(key);
           incrementTopic(topic);
-          console.debug(`[SSEWorker] Port ${portId} subscribed to "${topic}"`);
+          console.debug(`[SSEWorker] Port ${portId} subscribed to ${key}`);
         }
         break;
 
       case 'unsubscribe':
-        if (topic) {
-          entry.topics.delete(topic);
-          decrementTopic(topic);
-          console.debug(`[SSEWorker] Port ${portId} unsubscribed from "${topic}"`);
+        if (key && entry.topics.has(key)) {
+          entry.topics.delete(key);
+          decrementTopic(key);
+          console.debug(`[SSEWorker] Port ${portId} unsubscribed from ${key}`);
         }
         break;
 

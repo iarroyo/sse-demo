@@ -1,5 +1,6 @@
 package com.demo.sse.controller;
 
+import com.demo.sse.model.Topic;
 import com.demo.sse.service.SseEmitterService;
 import lombok.RequiredArgsConstructor;
 import org.springframework.http.ResponseEntity;
@@ -18,11 +19,10 @@ public class SseSubscriptionController {
     @PostMapping("/subscriptions")
     public ResponseEntity<?> subscribe(
             @RequestHeader("X-Emitter-Id") String emitterId,
-            @RequestBody Map<String, String> body,
+            @RequestBody Topic topic,
             Authentication authentication) {
-        String topic = body.get("topic");
-        if (topic == null || topic.isBlank()) {
-            return ResponseEntity.badRequest().body(Map.of("error", "topic is required"));
+        if (topic.eventName() == null || topic.eventName().isBlank()) {
+            return ResponseEntity.badRequest().body(Map.of("error", "eventName is required"));
         }
         sseEmitterService.addSubscription(emitterId, topic);
         return ResponseEntity.noContent().build();
@@ -31,11 +31,10 @@ public class SseSubscriptionController {
     @DeleteMapping("/subscriptions")
     public ResponseEntity<?> unsubscribe(
             @RequestHeader("X-Emitter-Id") String emitterId,
-            @RequestBody Map<String, String> body,
+            @RequestBody Topic topic,
             Authentication authentication) {
-        String topic = body.get("topic");
-        if (topic == null || topic.isBlank()) {
-            return ResponseEntity.badRequest().body(Map.of("error", "topic is required"));
+        if (topic.eventName() == null || topic.eventName().isBlank()) {
+            return ResponseEntity.badRequest().body(Map.of("error", "eventName is required"));
         }
         sseEmitterService.removeSubscription(emitterId, topic);
         return ResponseEntity.noContent().build();

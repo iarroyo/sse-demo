@@ -52,7 +52,7 @@ class FolderPage extends Component<{ Args: FolderPageArgs }> {
   }
 
   subscribeToFolderEvents() {
-    const topic = `folder:${this.folderId}`;
+    const topic = { eventName: 'folder', resourceId: this.folderId };
 
     const unsubDocs = this.realtimeSse.subscribe(topic, (payload) => {
       const data = payload as Record<string, string>;
@@ -77,10 +77,7 @@ class FolderPage extends Component<{ Args: FolderPageArgs }> {
   }
 
   subscribeToUserNotifications() {
-    const userId = this.session.currentUser?.id;
-    if (!userId) return;
-    const topic = `user:${userId}:notifications`;
-    const unsub = this.realtimeSse.subscribe(topic, (payload) => {
+    const unsub = this.realtimeSse.subscribe({ eventName: 'notifications' }, (payload) => {
       const data = payload as Record<string, string>;
       if (data.type === 'FOLDER_SHARED') {
         this.notifications.push('info', `Folder shared: ${data.folderName}`);
