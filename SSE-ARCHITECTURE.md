@@ -31,16 +31,33 @@ server load.
 
 ---
 
+## Topics
+
+A topic is an object `{ eventName, resourceId? }`, for example
+`{ eventName: 'folder', resourceId: '123' }` or `{ eventName: 'notifications' }`. Topics
+never contain a userId: the server resolves the user from the session and only publishes
+to that user's emitters.
+
+Because two objects with the same content are not equal in JavaScript, the service and the
+worker index their maps by `topicKey(topic)`, a string such as `'["folder","123"]'`. The
+key is internal; only the topic object goes over the wire. On the server, `Topic` is a Java
+record, which compares by value.
+
+In the diagrams below, `T` stands for `{ eventName: 'folder', resourceId: '123' }`.
+
+---
+
 ## Message Protocol
 
 ### Tab → Worker
 
 | Message | Meaning |
 |---------|---------|
-| `{ type: 'subscribe', topic }` | Register interest in a topic |
-| `{ type: 'unsubscribe', topic }` | Deregister interest in a topic |
+| `{ type: 'subscribe', topic: { eventName, resourceId } }` | Register interest in a topic |
+| `{ type: 'unsubscribe', topic: { eventName, resourceId } }` | Deregister interest in a topic (ignored if this port never subscribed to it) |
+| `{ type: 'register-lock', lockName }` | Name of the Web Lock this tab holds for its lifetime (see Scenario 9) |
 | `{ type: 'disconnect' }` | Ember application is being torn down (rarely sent in normal use — not triggered by tab close or route transitions) |
-| `{ type: 'disconnect-sse' }` | Close SSE connection without reconnecting (on logout) |
+| `{ type: 'disconnect-sse' }` | Close SSE connection without reconnecting (on logout, before the session is invalidated) |
 | `{ type: 'connect-sse' }` | Establish SSE connection (e.g. after re-login) |
 
 ### Worker → Tab
@@ -50,7 +67,9 @@ server load.
 | `{ type: 'worker:ready', portId }` | Handshake complete — re-announce subscriptions |
 | `{ type: 'sse:connected' }` | SSE link is up |
 | `{ type: 'sse:reconnecting' }` | SSE link dropped, auto-reconnecting |
-| `{ topic, payload }` | Routed event for a subscribed topic |
+| `{ eventName, resourceId, payload }` | Routed event for a subscribed topic |
+
+The worker never forwards the `emitterId` to tabs; it owns all REST calls to the server.
 
 ---
 
@@ -121,40 +140,42 @@ is no need for the tab to know the `emitterId`.
 Subscriptions are three-layered:
 
 **Layer 1 — `RealtimeSseService` (per tab):**
-Maintains a `Map<topic, Set<callback>>`. Multiple components in the same tab can register
-callbacks for the same topic. The worker is notified only once per topic per tab (on the
-first subscriber and on the last unsubscribe). The tab never calls the server directly.
+Maintains a `Map<topicKey, { topic, callbacks }>`. Multiple components in the same tab can
+register callbacks for the same topic. The worker is notified only once per topic per tab
+(on the first subscriber and on the last unsubscribe). The tab never calls the server
+directly.
 
 **Layer 2 — `sse-worker.js` (shared):**
-Maintains a `Set<topic>` per port for routing and a global `topicRefCount` map across all
-ports. When an SSE event arrives, it routes the raw payload to every port that has
-subscribed to that topic. The worker calls the server REST API when `topicRefCount` goes
-from 0 to 1 (POST) or from 1 to 0 (DELETE), ensuring the server is notified only once
-regardless of how many tabs are listening.
+Maintains a `Set<topicKey>` per port for routing and a global
+`topicRefCount: Map<topicKey, { topic, count }>` across all ports. When an SSE event
+arrives, it routes the payload to every port that has subscribed to that topic. The worker
+calls the server REST API when a topic's count goes from 0 to 1 (POST) or from 1 to 0
+(DELETE), ensuring the server is notified only once regardless of how many tabs are
+listening.
 
 **Layer 3 — Server (`SseEmitterService`):**
-Maintains a `Set<topic>` per emitter. `publish()` skips emitters that have not subscribed
+Maintains a `Set<Topic>` per emitter. `publish()` skips emitters that have not subscribed
 to the topic, avoiding unnecessary SSE traffic when the user navigates away from a page.
 
 ```
-Component A subscribes to "folder:123"
-  └─► RealtimeSseService.subscribe("folder:123", cbA)
-        ├─► callbacks.set("folder:123", Set{ cbA })
-        └─► worker ← { type: 'subscribe', topic: 'folder:123' }
-              ├─► portRegistry[portId].topics.add("folder:123")
-              └─► incrementTopic("folder:123")
-                    # topicRefCount: 0→1 → POST /api/sse/subscriptions
-                    #   X-Emitter-Id: abc-123  { topic: "folder:123" }
-                    #   server: emitterTopics["abc-123"].add("folder:123")
+Component A subscribes to T
+  └─► RealtimeSseService.subscribe(T, cbA)
+        ├─► callbacks.set('["folder","123"]', { topic: T, cbs: Set{ cbA } })
+        └─► worker ← { type: 'subscribe', topic: T }
+              ├─► portRegistry[portId].topics.add('["folder","123"]')
+              └─► incrementTopic(T)
+                    # count: 0→1 → POST /api/sse/subscriptions
+                    #   X-Emitter-Id: abc-123  { "eventName": "folder", "resourceId": "123" }
+                    #   server: emitterTopics["abc-123"].add(Topic[folder, 123])
 
-Component B (same tab) subscribes to "folder:123"
-  └─► RealtimeSseService.subscribe("folder:123", cbB)
-        ├─► callbacks.get("folder:123").add(cbB)   # Set{ cbA, cbB }
+Component B (same tab) subscribes to T
+  └─► RealtimeSseService.subscribe(T, cbB)
+        ├─► callbacks entry gets cbB              # cbs: Set{ cbA, cbB }
         └─► worker NOT notified (topic already registered for this tab)
 
-SSE event arrives: { topic: "folder:123", payload: { ... } }
-  └─► worker routes to all ports subscribed to "folder:123"
-        └─► Tab receives { topic, payload }
+SSE event arrives: { eventName: "folder", resourceId: "123", payload: { ... } }
+  └─► worker routes to all ports subscribed to '["folder","123"]'
+        └─► Tab receives { eventName, resourceId, payload }
               └─► RealtimeSseService calls cbA(payload) and cbB(payload)
 ```
 
@@ -164,22 +185,22 @@ SSE event arrives: { topic: "folder:123", payload: { ... } }
 
 ```
 Component A unsubscribes
-  └─► RealtimeSseService.removeCallback("folder:123", cbA)
-        └─► callbacks["folder:123"] = Set{ cbB }   # cbB still there, no worker message
+  └─► RealtimeSseService.removeCallback('["folder","123"]', cbA)
+        └─► cbs = Set{ cbB }                        # cbB still there, no worker message
 
 Component B unsubscribes (last callback for this topic)
-  └─► RealtimeSseService.removeCallback("folder:123", cbB)
-        ├─► callbacks.delete("folder:123")          # map entry removed
-        └─► worker ← { type: 'unsubscribe', topic: 'folder:123' }
-              ├─► portRegistry[portId].topics.delete("folder:123")
-              └─► decrementTopic("folder:123")
-                    # topicRefCount: 1→0 → DELETE /api/sse/subscriptions
-                    #   X-Emitter-Id: abc-123  { topic: "folder:123" }
-                    #   server: emitterTopics["abc-123"].delete("folder:123")
-                    # if another tab still has topicRefCount ≥ 1 → no DELETE sent
+  └─► RealtimeSseService.removeCallback('["folder","123"]', cbB)
+        ├─► callbacks.delete('["folder","123"]')    # map entry removed
+        └─► worker ← { type: 'unsubscribe', topic: T }
+              ├─► portRegistry[portId].topics.delete('["folder","123"]')
+              └─► decrementTopic('["folder","123"]')
+                    # count: 1→0 → DELETE /api/sse/subscriptions
+                    #   X-Emitter-Id: abc-123  { "eventName": "folder", "resourceId": "123" }
+                    #   server: emitterTopics["abc-123"].remove(Topic[folder, 123])
+                    # if another tab still holds the topic (count ≥ 1) → no DELETE sent
 ```
 
-Events for `folder:123` will no longer be delivered to this tab. The server DELETE is only
+Events for folder `123` will no longer be delivered to this tab. The server DELETE is only
 sent when no other tab is still subscribed to the topic — if another tab is listening, the
 server subscription remains active and that tab continues to receive events unaffected.
 
@@ -204,31 +225,42 @@ Ember application destroyed
         ├─► worker ← { type: 'disconnect' }
         │     └─► portRegistry.delete(portId)
         │           └─► if portRegistry.size === 0 → disconnectSSE()
-        └─► worker.port.close()
+        ├─► worker.port.close()
+        └─► release lifetime lock   # worker's lock callback: port already gone, no-op
 ```
 
 In practice this path is rarely hit in a normal user session. Route transitions, navigating
 to another page within the app, and closing the tab do not trigger it.
 
-**Hard tab close, external navigation, or browser kill (Ctrl+W, crash, process termination):**
-The JavaScript context is destroyed by the browser with no opportunity to run code.
-`teardown()` never executes and no `disconnect` message is ever sent. The worker only
-discovers the port is gone the next time it attempts to write to it — either on the next
-incoming SSE event or on the next heartbeat broadcast. This is the dead port detection
-path (see Scenario 9).
+**Hard tab close, reload, external navigation, or crash:**
+`teardown()` never executes and no `disconnect` message is sent.
+`MessagePort.postMessage()` to a port whose tab is gone does not throw either, so the
+worker can't notice by writing to it. Instead, the browser releases the tab's lifetime
+Web Lock when its document is destroyed, which grants the request the worker queued for
+that lock (see Scenario 9):
 
 ```
-Tab killed by browser
-  └─► (no JS runs — teardown() is never called)
+Tab closed by the user
+  └─► (no disconnect message — teardown() is never called)
+  └─► browser releases the tab's lifetime lock
 
-Next SSE event or heartbeat
-  └─► worker tries port.postMessage(...)
-        └─► throws → port added to dead[] → removePort(portId)
-              └─► if portRegistry.size === 0 → disconnectSSE()
+If it was the last tab
+  └─► browser terminates the SharedWorker → EventSource closed with it
+        └─► server notices on its next write (heartbeat ≤ 25 s) → emitter cleaned up
+
+If other tabs remain
+  └─► worker's pending lock request is granted → removePort(portId)
+        └─► decrementTopic() for each of its topics
+              # topics no other tab holds → DELETE /api/sse/subscriptions
 ```
 
-In both cases, if other tabs remain open the backend SSE connection is unaffected. If this
-was the last tab, the connection is closed once the dead port is detected.
+If other tabs remain open, the backend SSE connection is unaffected.
+
+**Back/forward cache:** navigating away can put the page in the browser's back/forward
+cache (BFCache) instead of destroying it. Its lock stays held, so its port and
+subscriptions stay registered, and they are intact if the user comes back. If the worker
+posts to a cached page, the browser evicts it from the cache, which releases the lock and
+cleans up as above.
 
 ---
 
@@ -240,12 +272,16 @@ EventSource encounters error (network drop, server restart, etc.)
         ├─► worker broadcasts { type: 'sse:reconnecting' } to all ports
         │     └─► each Tab sets isConnected = false, isReconnecting = true
         └─► EventSource auto-reconnects (browser built-in behaviour)
-              └─► on reconnect: eventSource.onopen fires
-                    ├─► worker broadcasts { type: 'sse:connected' }
-                    │     └─► each Tab sets isConnected = true, isReconnecting = false
-                    └─► existing portRegistry subscriptions are preserved
-                          (worker-side topic sets were never cleared)
+              └─► existing portRegistry subscriptions are preserved
+                    (worker-side topic sets were never cleared)
 ```
+
+`sse:connected` is **not** sent on `onopen`; it is sent once the new `emitter:id` arrives
+(below).
+
+> If the reconnect gets a non-200 response (for example a 401 because the session
+> expired), the browser does not retry: the `EventSource` moves to `CLOSED` and stays
+> there until `connect()` is called.
 
 Worker-side topic sets in `portRegistry` and `topicRefCount` survive the SSE reconnect
 intact — no re-subscription messages to the worker are needed.
@@ -264,7 +300,7 @@ Server sends first SSE frame on the new connection
         ├─► worker stores currentEmitterId = 'xyz-456'
         ├─► syncServerSubscriptions()
         │     # POSTs each topic in topicRefCount to the server
-        │     POST /api/sse/subscriptions  X-Emitter-Id: xyz-456  { topic: "..." }
+        │     POST /api/sse/subscriptions  X-Emitter-Id: xyz-456  { eventName, resourceId }
         └─► worker broadcasts { type: 'sse:connected' } to all ports
               └─► each Tab sets isConnected = true, isReconnecting = false
 ```
@@ -277,17 +313,18 @@ Server sends first SSE frame on the new connection
 
 ### 7. Logout and re-login (forced re-authentication)
 
-Re-authentication is handled in two explicit steps to avoid a 401 retry loop.
+Re-authentication is handled in two explicit steps.
 
 **Step 1 — Logout: close SSE before the session is invalidated**
 
-If the `EventSource` is left open when the backend invalidates the session, it will
-trigger `onerror` and immediately try to reconnect — but with the now-invalid cookie,
-every reconnect attempt gets a 401. The worker keeps broadcasting `sse:reconnecting` to
-all ports in a tight retry loop until something stops it.
+Logging out does not close the SSE stream on the server: the logout handler only
+invalidates the session, and the emitter stays registered to the old user. If the
+`EventSource` were left open, the logged-out browser would keep receiving that user's
+events. (If the stream did drop afterwards, the reconnect would get a 401 and the browser
+would stop retrying, leaving the `EventSource` closed.)
 
-To prevent this, `SessionService.logout()` calls `disconnect()` on the service *before*
-hitting the logout endpoint:
+So `SessionService.logout()` calls `disconnect()` on the service *before* hitting the
+logout endpoint:
 
 ```
 User logs out
@@ -297,17 +334,20 @@ User logs out
               └─► disconnectSSE()   # EventSource closed cleanly, no auto-reconnect
 
   └─► POST /api/auth/logout         # session invalidated after SSE is already gone
-        └─► server cleanup: emitter removed, emitterTopics entry deleted
+
+Server notices the closed stream on its next write (heartbeat, ≤ 25 s)
+  └─► emitter onError/onCompletion → emitter removed, emitterTopics entry deleted
 ```
 
 **Step 2 — Re-login: open a fresh SSE connection**
 
-After a successful login the new session cookie is set by the browser. `connect()` is
-called to open a new `EventSource`, which picks up the fresh cookie automatically:
+After a successful login the browser stores the new session cookie. `SessionService.login()`
+then calls `connect()` to open a new `EventSource`, which picks up the fresh cookie
+automatically:
 
 ```
 User logs in
-  └─► POST /api/auth/login → Set-Cookie: SESSION=<new>
+  └─► POST /api/auth/login → Set-Cookie: JSESSIONID=<new>
 
   └─► RealtimeSseService.connect()
         └─► worker ← { type: 'connect-sse' }
@@ -336,8 +376,8 @@ arrives — tabs are not involved.
 
 ```
 Last tab closes
-  └─► portRegistry becomes empty → disconnectSSE()
-  └─► browser terminates the SharedWorker process
+  └─► browser terminates the SharedWorker process (EventSource closed with it)
+        # no disconnect message is involved — see Scenario 5
 
 New tab opens later
   └─► browser spawns a fresh SharedWorker process  (identical to Scenario 1)
@@ -355,23 +395,53 @@ The key difference: if the backend was publishing events during the downtime win
 
 ### 9. Dead port detection
 
-If a port throws on `postMessage` (tab crashed without sending `disconnect`), the worker
-detects it during the next broadcast or route call:
+`MessagePort` gives no signal when the other side goes away: `postMessage` to a closed,
+reloaded or crashed tab's port silently does nothing, and the proposed `close` event was
+removed from the HTML spec without shipping. The worker uses Web Locks instead, because
+the browser releases a document's locks when the document is destroyed.
+
+```
+RealtimeSseService (on start)
+  └─► navigator.locks.request('sse-tab-<uuid>', () => never-settling promise)
+        └─► once GRANTED: worker ← { type: 'register-lock', lockName }
+              └─► worker: navigator.locks.request(lockName, ...)   # queued behind the tab
+
+Tab document destroyed (close, reload, navigation, crash)
+  └─► browser releases the tab's lock
+        └─► worker's request is granted
+              └─► removePort(portId)        # skipped if the port is already gone
+                    ├─► decrementTopic() for each of its topics
+                    │     # count 1→0 → DELETE /api/sse/subscriptions
+                    ├─► portRegistry.delete(portId)
+                    └─► if empty → disconnectSSE()
+```
+
+The tab only sends `register-lock` **after** its own request is granted. If it sent the
+name first, the worker's request could reach the lock manager first, be granted right
+away, and make the worker drop a live tab.
+
+On explicit teardown the service sends `disconnect` and then releases its lock. The
+worker's lock callback finds the port already removed and does nothing.
+
+If Web Locks are unavailable (they require a secure context: `https` or `localhost`), the
+service logs a warning and closed tabs are not detected.
+
+`routeToSubscribers` and `broadcastToAll` also wrap `port.postMessage` in `try/catch` and
+remove any port that throws:
 
 ```
 routeToSubscribers / broadcastToAll
   └─► port.postMessage throws
         └─► portId added to dead[] list
               └─► removePort(portId) called after iteration
-                    ├─► for each topic in portRegistry[portId].topics:
-                    │     decrementTopic(topic)
-                    │       # topicRefCount 1→0 → DELETE /api/sse/subscriptions
+                    ├─► for each topicKey in portRegistry[portId].topics:
+                    │     decrementTopic(topicKey)
+                    │       # count 1→0 → DELETE /api/sse/subscriptions
                     ├─► portRegistry.delete(portId)
                     └─► if empty → disconnectSSE()
 ```
 
-This ensures stale ports never accumulate in the registry and server-side subscriptions
-are cleaned up even when a tab crashes without sending `disconnect`.
+This only catches messages that can't be serialized; it does not detect closed tabs.
 
 ---
 
@@ -385,30 +455,34 @@ characteristics:
 - **Emitter map:** `userId → List<SseEmitter>` — supports multiple devices/browsers per user.
 - **Emitter identity:** each emitter is assigned a UUID (`emitterId`) on creation. It is
   sent to the client as the first SSE event: `{ type: "emitter:id", emitterId: "..." }`.
-- **Subscription map:** `emitterId → Set<topic>` — tracks which topics each emitter has
+- **Subscription map:** `emitterId → Set<Topic>` — tracks which topics each emitter has
   registered interest in. `publish()` skips emitters that have not subscribed to the topic.
-- **Heartbeat:** every 25 seconds a comment event is sent to all emitters to keep
+- **Heartbeat:** every 25 seconds a `:heartbeat` comment is sent to all emitters to keep
   proxies and load balancers from closing idle connections.
 - **Dead emitter cleanup:** failed `send()` calls remove the emitter and its subscription
   set from all maps.
-- **Publish API:** `publish(userId, topic, payload)` and
-  `publishToUsers(userIds, topic, payload)`.
+- **Publish API:** `publish(userId, Topic, payload)` and
+  `publishToUsers(userIds, Topic, payload)`, with `Topic.folder(id)` and
+  `Topic.NOTIFICATIONS` for the topics in use.
 
-The SSE payload format is:
+Every SSE event uses the event name `message`, and its data is:
 
 ```json
-{ "topic": "folder:123", "payload": { "action": "document-added", ... } }
+{ "eventName": "folder", "resourceId": "123", "payload": { "type": "DOCUMENT_CREATED", ... } }
 ```
+
+For `notifications`, `resourceId` is `null`.
 
 ### `SseSubscriptionController`
 
 Exposes two endpoints for managing server-side topic subscriptions. Both require
-authentication and the `X-Emitter-Id` header identifying the SSE connection.
+authentication and the `X-Emitter-Id` header identifying the SSE connection. A missing or
+blank `eventName` returns 400.
 
 | Method | Path | Body | Effect |
 |--------|------|------|--------|
-| `POST` | `/api/sse/subscriptions` | `{ "topic": "folder:123" }` | Add topic to emitter's subscription set |
-| `DELETE` | `/api/sse/subscriptions` | `{ "topic": "folder:123" }` | Remove topic from emitter's subscription set |
+| `POST` | `/api/sse/subscriptions` | `{ "eventName": "folder", "resourceId": "123" }` | Add topic to emitter's subscription set |
+| `DELETE` | `/api/sse/subscriptions` | `{ "eventName": "folder", "resourceId": "123" }` | Remove topic from emitter's subscription set |
 
 ---
 
@@ -424,7 +498,7 @@ does not immediately replace a running worker.
 - New tabs opening after a deploy may connect to the old worker if it is still alive.
 - Once the last tab closes, the worker dies. The next tab to open gets the new version.
 
-**Mitigation:** Include a `version` constant in the worker and send it in the
+**Mitigation (not implemented yet):** Include a `version` constant in the worker and send it in the
 `worker:ready` message. The `RealtimeSseService` can compare it against the expected
 version and reload the page if there is a mismatch — ensuring a freshly opened tab never
 silently runs against a stale worker.

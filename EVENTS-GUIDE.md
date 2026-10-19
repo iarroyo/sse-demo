@@ -12,19 +12,21 @@ The tabs and the SharedWorker communicate via a structured messaging protocol:
 
 ### From Tab to Worker
 
-- **Subscribe:** Registers a tab's interest in a specific topic.
-- **Unsubscribe:** Deregisters interest from a topic.
+- **Subscribe:** Registers a tab's interest in a specific topic. A topic is an object `{ eventName, resourceId? }`, for example `{ eventName: 'folder', resourceId: '123' }` or `{ eventName: 'notifications' }`. Topics never contain a userId: the server resolves the user from the session and only sends events to that user's connections.
+- **Unsubscribe:** Deregisters interest from a topic. Ignored if the tab never subscribed to it.
+- **Register Lock:** Tells the worker the name of the Web Lock the tab holds for as long as its page lives, so the worker can tell when the tab is gone (see Dead Port Detection).
 - **Disconnect:** Notifies the worker that a port is going away. Because `RealtimeSseService` is an application-scoped service, it is only destroyed when the Ember application itself is torn down — not on route transitions. In practice this message is rarely sent in a normal user session (test teardown or an explicit `app.destroy()` call are the typical triggers). On a hard tab close or any external navigation the JavaScript context is killed immediately and the worker discovers the dead port passively on the next write attempt.
-- **Disconnect SSE:** Closes the SSE connection without reconnecting, used on logout to prevent a 401 retry loop.
+- **Disconnect SSE:** Closes the SSE connection without reconnecting, used on logout so the logged-out browser stops receiving the previous user's events.
 - **Connect SSE:** Establishes a fresh SSE connection, typically used after a user re-authenticates.
 
 ### From Worker to Tab
 
-- **Worker Ready:** Sent when the initial handshake completes, prompting the tab to re-announce its active subscriptions. Includes the current `emitterId` if the SSE connection is already open, or `null` if it is still being established.
-- **SSE Connected:** Confirms the backend SSE link is successfully established.
+- **Worker Ready:** Sent when the initial handshake completes, prompting the tab to re-announce its active subscriptions. Carries only the tab's `portId`.
+- **SSE Connected:** Confirms the backend SSE link is established and the server has assigned an emitter ID, so subscriptions can be registered. Sent right away to a new tab if the connection is already up.
 - **SSE Reconnecting:** Warns tabs that the network link dropped and the system is attempting to reconnect.
-- **Emitter ID:** Delivers the server-assigned identifier for the current SSE connection. The tab uses this ID to register and deregister topic subscriptions with the server via REST.
-- **Event Route:** Delivers the raw event payload directly to the tabs subscribed to that specific topic.
+- **Event Route:** Delivers `{ eventName, resourceId, payload }` to the tabs subscribed to that topic.
+
+The server-assigned emitter ID stays inside the worker: the worker, not the tabs, registers and deregisters topic subscriptions with the server via REST.
 
 ## Technical Scenarios and Lifecycle Behaviors
 
@@ -50,6 +52,8 @@ When additional tabs are opened under the same origin, the browser recognizes th
 
 The system processes subscriptions using a three-layer approach:
 
+Because two topic objects with the same content are not equal in JavaScript, the app and worker layers index topics by a string key built from `eventName` and `resourceId`. On the server, topics are a Java record that compares by value.
+
 - **App layer (RealtimeSseService):** Manages a map of callbacks for each topic. Multiple UI components within the _same_ tab can listen to the exact same topic. The worker is only notified when the very first component subscribes to a topic in that tab, or when the final component unsubscribes. The service never calls the server directly.
 - **Shared Worker layer (sse-worker.js):** Tracks a set of subscribed topics per port for routing, and a global `topicRefCount` map across all open ports. When an event arrives from the server, the worker forwards the payload only to the ports that requested it. The worker owns all REST calls to the server: it sends a POST when `topicRefCount` goes from 0 to 1 (first tab subscribing), and a DELETE when it drops from 1 to 0 (last tab unsubscribing). This prevents one tab's unsubscribe from removing a server subscription that another tab still needs.
 - **Server layer (SseEmitterService):** Tracks a set of subscribed topics for every active emitter. When publishing an event, the server skips emitters that have not registered interest in that topic, eliminating unnecessary SSE traffic when the user navigates away from a page.
@@ -66,14 +70,14 @@ There are two distinct paths depending on how the tab exits.
 
 When the Ember application is explicitly torn down (e.g. programmatic `app.destroy()` or test teardown), the service destructor fires and sends a disconnect message to the worker, which removes that port from the registry. If other tabs are still open, the backend SSE connection is completely unaffected. If this was the last tab, the worker closes the SSE connection and becomes idle until the browser terminates it. In-app route transitions do not trigger this path — the service is application-scoped and stays alive for the entire session.
 
-When a tab is hard-closed, no JavaScript runs — the teardown never executes and no disconnect message is sent. The worker only discovers the port is gone the next time it tries to write to it, either on an incoming SSE event or on the next heartbeat. At that point the dead port is removed from the registry, and if it was the last one, the SSE connection is closed then.
+When a tab is closed, reloaded or crashes, no teardown runs and no disconnect message is sent. Instead, the browser releases the tab's lifetime Web Lock, and the worker, which was waiting on that lock, removes the tab's port and releases its topic subscriptions. If it was the last tab, the browser terminates the worker, which closes the SSE connection; the server cleans up the emitter on its next heartbeat. A page kept in the back/forward cache keeps its lock, and its subscriptions, until it is either restored or evicted (see Dead Port Detection below).
 
 **6\. Network Disconnections and Server Restarts**
 
 If the network drops or the backend server restarts, the built-in browser behavior of the EventSource API handles the failure.
 
 1. The worker detects the connection error and immediately broadcasts an sse:reconnecting status to all tabs so they can update their internal states.
-2. The browser automatically attempts to reconnect in the background.
+2. The browser automatically attempts to reconnect in the background. If the server answers with an error status instead (for example a 401 after the session expired), the browser stops retrying and the connection stays closed until `connect()` is called.
 3. Once restored, the server creates a new emitter and sends a fresh emitter:id event. The worker stores the new ID and immediately re-registers all active topics with the server via `syncServerSubscriptions`. Tabs are not involved in this step.
 4. The worker broadcasts an sse:connected confirmation.
 
@@ -81,11 +85,11 @@ Worker-side topic sets are preserved during the drop so tabs do not need to re-a
 
 **7\. Forced Re-authentication (Post-Login)**
 
-Re-authentication is handled in two explicit steps to avoid a problem with the browser's EventSource auto-reconnect behaviour.
+Re-authentication is handled in two explicit steps.
 
-When a user logs out, the backend invalidates the session. If the SSE connection were left open at that point, the EventSource would detect the closure, trigger an error, and immediately start retrying — but each retry carries the now-invalid session cookie and receives a 401. The worker would keep broadcasting a reconnecting status to all tabs in a tight retry loop until something stopped it.
+When a user logs out, the backend invalidates the session but does not close the SSE stream: the emitter stays registered to the old user. If the connection were left open, the logged-out browser would keep receiving that user's events.
 
-To prevent this, the front-end calls `disconnect()` on the SSE service before the logout request is sent. This clears the stored emitter ID and instructs the worker to close the EventSource cleanly with no auto-reconnect, so by the time the session is invalidated on the server, the connection is already gone.
+To prevent this, the front-end calls `disconnect()` on the SSE service before the logout request is sent. This clears the stored emitter ID and instructs the worker to close the EventSource cleanly with no auto-reconnect, so by the time the session is invalidated on the server, the connection is already gone. The server removes the emitter when its next heartbeat write fails.
 
 Once the user logs back in and the browser has received the new session cookie, the front-end calls `connect()`. This instructs the worker to establish a fresh EventSource connection. The server immediately sends a new emitter:id. The worker stores it and re-registers all active topics with the server directly via `syncServerSubscriptions` — tabs are not involved. Worker-side topic sets are untouched across both steps, so events resume without any component needing to re-subscribe.
 
@@ -95,7 +99,18 @@ If all tabs are closed, the worker process is terminated by the browser. When a 
 
 **9\. Dead Port Detection**
 
-To prevent memory leaks from unexpected crashes (such as a tab crashing hard without firing its disconnect events), the worker uses defensive checks. Whenever the worker attempts to broadcast or route a message, any port that throws an error is instantly flagged as dead. The worker purges these dead ports from its registry and gracefully disconnects from the backend if no healthy tabs remain.
+A `MessagePort` gives no signal when the tab on the other side goes away: posting to a closed or crashed tab's port silently does nothing. To detect closed tabs anyway, the system uses the Web Locks API, because the browser releases a page's locks when the page is destroyed — on close, reload, navigation or crash.
+
+1. On startup, each tab requests a uniquely named lock and never releases it.
+2. Only once the lock is granted does the tab send its name to the worker. Sending it earlier could let the worker grab the lock first and wrongly conclude the tab is gone.
+3. The worker requests the same lock. The request stays queued while the tab is alive.
+4. When the tab's page is destroyed, the browser releases the lock and grants the worker's request. The worker then removes the port, releases its topic subscriptions (calling the server only for topics no other tab still needs), and disconnects from the backend if no tabs remain.
+
+A page kept in the back/forward cache is not destroyed, so it keeps its lock and its subscriptions stay registered; they work again if the user returns. If the worker sends it a message while it is cached, the browser evicts the page, which releases the lock.
+
+Web Locks require a secure context (`https` or `localhost`). Where they are unavailable, the service logs a warning and closed tabs are not detected.
+
+In addition, whenever the worker broadcasts or routes a message, any port that throws an error is removed. This only catches messages that can't be serialized.
 
 # Demo
 

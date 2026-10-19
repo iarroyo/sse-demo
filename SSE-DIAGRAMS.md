@@ -3,6 +3,9 @@
 Visual representation of all lifecycle scenarios. See `SSE-ARCHITECTURE.md` for detailed
 written descriptions.
 
+`T` stands for the topic `{ eventName: "folder", resourceId: "123" }`. Maps in the
+service and the worker are indexed by its `topicKey`, `'["folder","123"]'`.
+
 ---
 
 ## 1. First Tab - Connection & Emitter ID
@@ -56,11 +59,11 @@ sequenceDiagram
     Worker-->>TabB: { type: "sse:connected" }
     TabB->>TabB: isConnected = true
 
-    TabB->>Worker: { type: "subscribe", topic: "folder:123" }
-    Worker->>Worker: portRegistry[portId=2].topics.add("folder:123")
-    Worker->>Worker: incrementTopic("folder:123") - topicRefCount 0 to 1
-    Worker->>Server: POST /api/sse/subscriptions { topic: "folder:123" }<br/>X-Emitter-Id: abc-123
-    Note over Server: emitterTopics["abc-123"].add("folder:123")
+    TabB->>Worker: { type: "subscribe", topic: T }
+    Worker->>Worker: portRegistry[portId=2].topics.add(topicKey(T))
+    Worker->>Worker: incrementTopic(T) - count 0 to 1
+    Worker->>Server: POST /api/sse/subscriptions { eventName: "folder", resourceId: "123" }<br/>X-Emitter-Id: abc-123
+    Note over Server: emitterTopics["abc-123"].add(Topic[folder, 123])
 ```
 
 ---
@@ -76,18 +79,18 @@ sequenceDiagram
     participant Worker as SharedWorker
     participant Server as BFF
 
-    Comp->>Service: subscribe("folder:123", callback)
+    Comp->>Service: subscribe(T, callback)
     Note over Service: First subscriber for this topic in this tab
-    Service->>Worker: { type: "subscribe", topic: "folder:123" }
-    Worker->>Worker: portRegistry[portId].topics.add("folder:123")
-    Worker->>Worker: incrementTopic("folder:123") - topicRefCount 0 to 1
-    Worker->>Server: POST /api/sse/subscriptions { topic: "folder:123" }<br/>X-Emitter-Id: abc-123
-    Note over Server: emitterTopics["abc-123"].add("folder:123")
+    Service->>Worker: { type: "subscribe", topic: T }
+    Worker->>Worker: portRegistry[portId].topics.add(topicKey(T))
+    Worker->>Worker: incrementTopic(T) - count 0 to 1
+    Worker->>Server: POST /api/sse/subscriptions { eventName: "folder", resourceId: "123" }<br/>X-Emitter-Id: abc-123
+    Note over Server: emitterTopics["abc-123"].add(Topic[folder, 123])
 
-    Note over Server: Another user creates a document in folder:123
-    Server-->>Worker: SSE: { topic: "folder:123", payload: { ... } }
-    Worker->>Worker: routeToSubscribers("folder:123")
-    Worker-->>Service: { topic: "folder:123", payload: { ... } }
+    Note over Server: Another user creates a document in folder 123
+    Server-->>Worker: SSE: { eventName: "folder", resourceId: "123", payload: { ... } }
+    Worker->>Worker: routeToSubscribers(T)
+    Worker-->>Service: { eventName: "folder", resourceId: "123", payload: { ... } }
     Service->>Comp: callback(payload)
 ```
 
@@ -106,14 +109,14 @@ sequenceDiagram
     participant Server as BFF
 
     CompA->>Service: unsubscribe() [callback A]
-    Note over Service: callbacks["folder:123"] still has B - no worker message
+    Note over Service: topic T still has callback B - no worker message
 
     CompB->>Service: unsubscribe() [callback B - last subscriber]
-    Service->>Worker: { type: "unsubscribe", topic: "folder:123" }
-    Worker->>Worker: portRegistry[portId].topics.delete("folder:123")
-    Worker->>Worker: decrementTopic("folder:123") - topicRefCount 1 to 0
-    Worker->>Server: DELETE /api/sse/subscriptions { topic: "folder:123" }<br/>X-Emitter-Id: abc-123
-    Note over Server: emitterTopics["abc-123"].delete("folder:123")<br/>Server skips this topic on future publishes
+    Service->>Worker: { type: "unsubscribe", topic: T }
+    Worker->>Worker: portRegistry[portId].topics.delete(topicKey(T))
+    Worker->>Worker: decrementTopic(topicKey(T)) - count 1 to 0
+    Worker->>Server: DELETE /api/sse/subscriptions { eventName: "folder", resourceId: "123" }<br/>X-Emitter-Id: abc-123
+    Note over Server: emitterTopics["abc-123"].remove(Topic[folder, 123])<br/>Server skips this topic on future publishes
 ```
 
 ---
@@ -152,8 +155,9 @@ sequenceDiagram
 
 ## 6. Logout & Re-login
 
-SSE is closed before session invalidation to prevent a 401 retry loop. A new emitter is
-assigned after successful re-authentication.
+SSE is closed before session invalidation, because logout does not close the stream on the
+server and it would keep delivering the old user's events. A new emitter is assigned after
+successful re-authentication.
 
 ```mermaid
 sequenceDiagram
@@ -167,11 +171,12 @@ sequenceDiagram
     Worker->>Worker: disconnectSSE() - EventSource closed, no auto-reconnect
 
     Tab->>Server: POST /api/auth/logout
-    Note over Server: Session invalidated<br/>emitter removed, topic set deleted
+    Note over Server: Session invalidated
+    Note over Server: Next heartbeat write fails (≤ 25 s)<br/>emitter removed, topic set deleted
 
     Note over Tab: User fills in credentials and logs in
     Tab->>Server: POST /api/auth/login
-    Server-->>Tab: 200 OK + Set-Cookie: SESSION=<new>
+    Server-->>Tab: 200 OK + Set-Cookie: JSESSIONID=<new>
 
     Tab->>Worker: { type: "connect-sse" }
     Worker->>Server: GET /api/sse/connect (new EventSource, fresh cookie)
@@ -189,30 +194,34 @@ sequenceDiagram
 
 ---
 
-## 7. Hard Tab Close - Dead Port Detection
+## 7. Hard Tab Close - Lifetime Lock
 
-The tab is killed with no opportunity to run code. The worker discovers the dead port
-passively on the next write attempt.
+The tab is closed with no `disconnect` message, and posting to its port would not throw.
+The worker learns about it from the tab's Web Lock instead (see Scenario 9 in
+`SSE-ARCHITECTURE.md`).
 
 ```mermaid
 sequenceDiagram
     participant Tab
+    participant Locks as Lock manager (browser)
     participant Worker as SharedWorker
     participant Server as BFF
 
-    Note over Tab: Tab killed (Ctrl+W, crash, process termination)<br/>No JS runs - disconnect never sent
+    Tab->>Locks: request("sse-tab-uuid") - held forever
+    Locks-->>Tab: granted
+    Tab->>Worker: { type: "register-lock", lockName: "sse-tab-uuid" }
+    Worker->>Locks: request("sse-tab-uuid") - queued behind the tab
 
-    Note over Worker: portRegistry still holds the dead port
+    Note over Tab: Tab closed (Ctrl+W, reload, crash)<br/>disconnect never sent
+    Locks->>Locks: document destroyed - tab's lock released
 
-    Server-->>Worker: SSE event or heartbeat
-    Worker->>Tab: port.postMessage(...) throws
-    Worker->>Worker: dead.push(portId)
-    Worker->>Worker: removePort(portId) - portRegistry.delete(portId)
-
-    alt Last port removed
-        Worker->>Worker: disconnectSSE()
-        Worker->>Server: SSE connection closed
-    else Other ports still active
-        Note over Worker: SSE connection stays open
+    alt Last tab closed
+        Note over Worker: Browser terminates the SharedWorker
+        Worker--xServer: EventSource closed with the worker
+        Note over Server: Next heartbeat write fails (≤ 25 s)<br/>emitter removed, topic set deleted
+    else Other tabs still open
+        Locks-->>Worker: granted
+        Worker->>Worker: removePort(portId) - decrementTopic() per topic
+        Worker->>Server: DELETE /api/sse/subscriptions<br/>for topics no other tab holds
     end
 ```

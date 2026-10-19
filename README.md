@@ -1,8 +1,8 @@
 # SSE Demo — Library
 
 A Proof of Concept for Server-Sent Events using:
-- **Backend**: Spring Boot / Spring 7 / Tomcat 11 / Java 25
-- **Frontend**: Ember.js 7 (GTS) + Shared Worker SSE bridge
+- **Backend**: Spring Boot 3.4 (Spring Framework 6.2, embedded Tomcat 10.1) / Java 21
+- **Frontend**: Ember.js 7 (GTS, Vite + Embroider) + Shared Worker SSE bridge
 
 ## Architecture
 
@@ -81,21 +81,31 @@ registerDestructor(this, unsub);
 ## Demo Scenarios
 
 1. Open two browser windows (or use two different browsers)
-2. Log in as `alice` in one and `bob` in another (password = username)
+2. Log in as `alice` in one and `bob` in another (password = username;
+   `charlie` is also available)
 3. Alice creates folder "Project X"
-4. Alice shares "Project X" with Bob → Bob gets notification
-5. Alice creates a document in "Project X" → Bob gets notified (Alice does NOT)
-6. Bob navigates to the folder → subscribes to folder-level events
-7. Alice adds another document → Bob sees real-time update
+4. Alice shares "Project X" with Bob → Bob gets a `FOLDER_SHARED` notification
+5. Alice creates a document in "Project X" → Bob, on his library page, gets a
+   `DOCUMENT_CREATED_NOTIFICATION` (Alice does NOT)
+6. Bob opens the folder → subscribes to `{ eventName: "folder", resourceId: <id> }`
+7. Alice adds or deletes a document → Bob's document list updates in real time
 
 ## Running
+
+### Prerequisites
+
+- **JDK 21**, used by the backend's Gradle toolchain
+- **Node.js ≥ 20.19**
+- **nginx** (optional), only for `devNginx`
+
+### Starting the stack
 
 Everything is started from the project root with the Gradle wrapper. Both
 tasks run `npm install` in `frontend/` first (skipped when up to date), then
 start the Vite dev server in the background and Spring Boot in the foreground.
 **Ctrl+C stops everything.**
 
-### Direct mode (default)
+#### Direct mode (default)
 ```bash
 ./gradlew dev
 ```
@@ -104,7 +114,7 @@ start the Vite dev server in the background and Spring Boot in the foreground.
 Browser → Vite :4200 → /api → Spring Boot :8080
 ```
 
-### Through Nginx (CloudFront timeout simulator)
+#### Through Nginx (CloudFront timeout simulator)
 Requires `nginx` on your `PATH` (macOS: `brew install nginx`).
 
 ```bash
@@ -141,12 +151,24 @@ nginx -c $(pwd)/nginx/sse-cf-sim.conf -s stop   # stop
 The `SseEmitterService` sends a `:heartbeat` comment every **25 seconds**,
 keeping the connection alive well within the 60-second window.
 
+Browser DevTools doesn't show SSE comments in the EventStream tab, so watch
+the raw stream through Nginx with `curl` instead (run with `./gradlew devNginx`):
+
+```bash
+# Log in and keep the session cookie
+curl -s -c /tmp/sse-cookies -d 'username=alice&password=alice' \
+  http://localhost:9090/api/auth/login
+
+# Stream events; ":heartbeat" lines should appear every ~25 s
+curl -N -b /tmp/sse-cookies http://localhost:9090/api/sse/connect
+```
+
 To confirm it works:
 
 | Step | What to do | Expected result |
 |---|---|---|
-| **Baseline** | Start with `./gradlew devNginx`, open app, log in, watch browser DevTools → Network → SSE stream | Heartbeat comments arrive every ~25 s |
-| **Simulate timeout** | Comment out `@Scheduled` in `SseEmitterService`, restart backend | After 60 s Nginx drops the connection; browser EventSource reconnects (you'll see a new SSE request) |
+| **Baseline** | Run the `curl` stream above | `:heartbeat` lines every ~25 s; the stream stays open |
+| **Simulate timeout** | Comment out `@Scheduled` on `sendHeartbeat()` in `SseEmitterService`, restart backend | After 60 s with no bytes, Nginx closes the stream. In the app, the EventSource reconnects (a new `/api/sse/connect` request in DevTools → Network); the SharedWorker gets a new emitter id and re-subscribes to all active topics |
 | **Re-enable heartbeat** | Uncomment `@Scheduled`, restart backend | Connection stays open indefinitely; no reconnects |
 
 You can observe Nginx's behaviour in real time:
