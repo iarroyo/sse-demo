@@ -4,7 +4,6 @@ import { tracked } from '@glimmer/tracking';
 import { action } from '@ember/object';
 import { on } from '@ember/modifier';
 import { registerDestructor } from '@ember/destroyable';
-import type SessionService from 'sse-demo/services/session';
 import type LibraryService from 'sse-demo/services/library';
 import type NotificationsService from 'sse-demo/services/notifications';
 import type RealtimeSseService from 'sse-demo/services/realtime-sse';
@@ -12,7 +11,6 @@ import FolderList from 'sse-demo/components/folder-list';
 import CreateFolderModal from 'sse-demo/components/create-folder-modal';
 
 class LibraryIndexPage extends Component {
-  @service declare session: SessionService;
   @service declare library: LibraryService;
   @service declare notifications: NotificationsService;
   @service declare realtimeSse: RealtimeSseService;
@@ -25,11 +23,7 @@ class LibraryIndexPage extends Component {
   }
 
   subscribeToNotifications() {
-    const userId = this.session.currentUser?.id;
-    if (!userId) return;
-
-    const topic = `user:${userId}:notifications`;
-    const unsub = this.realtimeSse.subscribe(topic, (payload) => {
+    const unsub = this.realtimeSse.subscribe({ eventName: 'notifications' }, (payload) => {
       const data = payload as Record<string, string>;
       if (data.type === 'FOLDER_SHARED') {
         this.notifications.push('info', `📂 "${data.folderName}" was shared with you by ${data.sharedByUsername}`);

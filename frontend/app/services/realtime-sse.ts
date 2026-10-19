@@ -6,6 +6,20 @@ export type SseCallback = (payload: unknown) => void;
 export type Unsubscribe = () => void;
 
 /**
+ * SSE topic. The recipient user is resolved server-side from the session,
+ * so topics never carry a userId.
+ */
+export interface SseTopic {
+  eventName: string;
+  resourceId?: string | null;
+}
+
+/** Stable string key for a topic (objects compare by reference in Maps). */
+function topicKey({ eventName, resourceId }: SseTopic): string {
+  return JSON.stringify([eventName, resourceId || null]);
+}
+
+/**
  * RealtimeSseService
  *
  * Provides a simple pub-sub API over a SharedWorker that manages
@@ -16,7 +30,10 @@ export type Unsubscribe = () => void;
  * POST/DELETE /api/sse/subscriptions when a topic goes from 0->1 or 1->0.
  *
  * Usage:
- *   const unsub = this.realtimeSse.subscribe('folder:123', (payload) => { ... });
+ *   const unsub = this.realtimeSse.subscribe(
+ *     { eventName: 'folder', resourceId: '123' },
+ *     (payload) => { ... },
+ *   );
  *   // call unsub() when done (e.g. registerDestructor)
  */
 export default class RealtimeSseService extends Service {
@@ -24,8 +41,8 @@ export default class RealtimeSseService extends Service {
   @tracked isReconnecting = false;
 
   private worker: SharedWorker | null = null;
-  /** topic -> set of callbacks registered in this tab */
-  private callbacks = new Map<string, Set<SseCallback>>();
+  /** topicKey -> topic and the callbacks registered for it in this tab */
+  private callbacks = new Map<string, { topic: SseTopic; cbs: Set<SseCallback> }>();
 
   constructor(...args: ConstructorParameters<typeof Service>) {
     super(...args);
@@ -75,7 +92,7 @@ export default class RealtimeSseService extends Service {
     if (data['type'] === 'worker:ready') {
       // Worker is fresh or restarted - re-announce subscriptions so the worker
       // can restore its portRegistry and topicRefCount for this tab
-      this.callbacks.forEach((_, topic) => {
+      this.callbacks.forEach(({ topic }) => {
         this.worker?.port.postMessage({ type: 'subscribe', topic });
       });
       return;
@@ -94,15 +111,16 @@ export default class RealtimeSseService extends Service {
     }
 
     // Routed topic event
-    const topic = data['topic'] as string | undefined;
+    const eventName = data['eventName'] as string | undefined;
+    const resourceId = data['resourceId'] as string | null | undefined;
     const payload = data['payload'];
-    if (topic) {
-      const cbs = this.callbacks.get(topic);
-      cbs?.forEach((cb) => {
+    if (eventName) {
+      const key = topicKey({ eventName, resourceId });
+      this.callbacks.get(key)?.cbs.forEach((cb) => {
         try {
           cb(payload);
         } catch (err) {
-          console.error(`[RealtimeSSE] Callback error for topic "${topic}":`, err);
+          console.error(`[RealtimeSSE] Callback error for topic ${key}:`, err);
         }
       });
     }
@@ -119,28 +137,37 @@ export default class RealtimeSseService extends Service {
    * receives only ONE subscribe/unsubscribe per topic per tab and manages
    * server-side registration globally across all tabs.
    */
-  subscribe(topic: string, callback: SseCallback): Unsubscribe {
-    if (!this.callbacks.has(topic)) {
-      this.callbacks.set(topic, new Set());
-      this.worker?.port.postMessage({ type: 'subscribe', topic });
+  subscribe(topic: SseTopic, callback: SseCallback): Unsubscribe {
+    const key = topicKey(topic);
+    let entry = this.callbacks.get(key);
+    if (!entry) {
+      entry = {
+        topic: { eventName: topic.eventName, resourceId: topic.resourceId },
+        cbs: new Set(),
+      };
+      this.callbacks.set(key, entry);
+      this.worker?.port.postMessage({ type: 'subscribe', topic: entry.topic });
     }
-    this.callbacks.get(topic)!.add(callback);
+    entry.cbs.add(callback);
 
     let called = false;
     return () => {
       if (called) return;
       called = true;
-      this.removeCallback(topic, callback);
+      this.removeCallback(key, callback);
     };
   }
 
-  private removeCallback(topic: string, callback: SseCallback) {
-    const cbs = this.callbacks.get(topic);
-    if (!cbs) return;
-    cbs.delete(callback);
-    if (cbs.size === 0) {
-      this.callbacks.delete(topic);
-      this.worker?.port.postMessage({ type: 'unsubscribe', topic });
+  private removeCallback(key: string, callback: SseCallback) {
+    const entry = this.callbacks.get(key);
+    if (!entry) return;
+    entry.cbs.delete(callback);
+    if (entry.cbs.size === 0) {
+      this.callbacks.delete(key);
+      this.worker?.port.postMessage({
+        type: 'unsubscribe',
+        topic: entry.topic,
+      });
     }
   }
 

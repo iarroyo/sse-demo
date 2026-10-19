@@ -1,6 +1,7 @@
 package com.demo.sse.service;
 
 import com.demo.sse.model.SseMessage;
+import com.demo.sse.model.Topic;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
@@ -30,7 +31,7 @@ public class SseEmitterService {
     private final Map<SseEmitter, String> emitterIdByEmitter = new ConcurrentHashMap<>();
 
     // emitterId -> subscribed topics
-    private final Map<String, Set<String>> emitterTopics = new ConcurrentHashMap<>();
+    private final Map<String, Set<Topic>> emitterTopics = new ConcurrentHashMap<>();
 
     public SseEmitter createEmitter(String userId) {
         String emitterId = UUID.randomUUID().toString();
@@ -63,8 +64,8 @@ public class SseEmitterService {
         return emitter;
     }
 
-    public void addSubscription(String emitterId, String topic) {
-        Set<String> topics = emitterTopics.get(emitterId);
+    public void addSubscription(String emitterId, Topic topic) {
+        Set<Topic> topics = emitterTopics.get(emitterId);
         if (topics == null) {
             log.warn("addSubscription: unknown emitterId={}", emitterId);
             return;
@@ -73,8 +74,8 @@ public class SseEmitterService {
         log.debug("Subscription added: emitterId={}, topic={}", emitterId, topic);
     }
 
-    public void removeSubscription(String emitterId, String topic) {
-        Set<String> topics = emitterTopics.get(emitterId);
+    public void removeSubscription(String emitterId, Topic topic) {
+        Set<Topic> topics = emitterTopics.get(emitterId);
         if (topics == null) {
             log.warn("removeSubscription: unknown emitterId={}", emitterId);
             return;
@@ -83,7 +84,7 @@ public class SseEmitterService {
         log.debug("Subscription removed: emitterId={}, topic={}", emitterId, topic);
     }
 
-    public void publish(String userId, String topic, Object payload) {
+    public void publish(String userId, Topic topic, Object payload) {
         List<SseEmitter> userEmitters = emitters.getOrDefault(userId, new CopyOnWriteArrayList<>());
         if (userEmitters.isEmpty()) return;
 
@@ -92,7 +93,7 @@ public class SseEmitterService {
 
         for (SseEmitter emitter : userEmitters) {
             String emitterId = emitterIdByEmitter.get(emitter);
-            Set<String> subscribedTopics = emitterId != null
+            Set<Topic> subscribedTopics = emitterId != null
                     ? emitterTopics.getOrDefault(emitterId, Set.of())
                     : Set.of();
 
@@ -113,7 +114,7 @@ public class SseEmitterService {
         dead.forEach(e -> removeEmitter(userId, e));
     }
 
-    public void publishToUsers(Iterable<String> userIds, String topic, Object payload) {
+    public void publishToUsers(Iterable<String> userIds, Topic topic, Object payload) {
         for (String userId : userIds) {
             publish(userId, topic, payload);
         }

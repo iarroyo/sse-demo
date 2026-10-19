@@ -89,7 +89,7 @@ module('Unit | Service | realtime-sse — teardown (tab close)', function (hooks
     const port = installWorkerMock();
     const service = this.owner.lookup('service:realtime-sse') as RealtimeSseService;
 
-    service.subscribe('folder:123', () => {});
+    service.subscribe({ eventName: 'folder', resourceId: '123' }, () => {});
 
     port.calls.length = 0; // discard subscribe setup calls
 
@@ -119,9 +119,9 @@ module('Unit | Service | realtime-sse — teardown (tab close)', function (hooks
     const port = installWorkerMock();
     const service = this.owner.lookup('service:realtime-sse') as RealtimeSseService;
 
-    service.subscribe('folder:aaa', () => {});
-    service.subscribe('folder:bbb', () => {});
-    service.subscribe('folder:ccc', () => {});
+    service.subscribe({ eventName: 'folder', resourceId: 'aaa' }, () => {});
+    service.subscribe({ eventName: 'folder', resourceId: 'bbb' }, () => {});
+    service.subscribe({ eventName: 'folder', resourceId: 'ccc' }, () => {});
 
     port.calls.length = 0;
 
@@ -184,5 +184,74 @@ module('Unit | Service | realtime-sse — teardown (tab close)', function (hooks
     } catch (e) {
       assert.ok(false, `teardown threw unexpectedly: ${e}`);
     }
+  });
+});
+
+module('Unit | Service | realtime-sse — topics', function (hooks) {
+  setupTest(hooks);
+
+  let savedSharedWorker: unknown;
+
+  hooks.beforeEach(function () {
+    savedSharedWorker = (window as unknown as Record<string, unknown>)['SharedWorker'];
+  });
+
+  hooks.afterEach(function () {
+    (window as unknown as Record<string, unknown>)['SharedWorker'] = savedSharedWorker;
+  });
+
+  function deliver(port: MockPort, data: unknown) {
+    port.onmessage?.({ data } as MessageEvent);
+  }
+
+  test('posts one subscribe per distinct topic, comparing topics by value', function (assert) {
+    const port = installWorkerMock();
+    const service = this.owner.lookup('service:realtime-sse') as RealtimeSseService;
+    port.calls.length = 0;
+
+    service.subscribe({ eventName: 'folder', resourceId: '123' }, () => {});
+    service.subscribe({ eventName: 'folder', resourceId: '123' }, () => {});
+    service.subscribe({ eventName: 'notifications' }, () => {});
+
+    assert.deepEqual(
+      postMessageCalls(port).map((c) => c.args[0]),
+      [
+        { type: 'subscribe', topic: { eventName: 'folder', resourceId: '123' } },
+        { type: 'subscribe', topic: { eventName: 'notifications', resourceId: undefined } },
+      ],
+    );
+  });
+
+  test('routes events by eventName and resourceId', function (assert) {
+    const port = installWorkerMock();
+    const service = this.owner.lookup('service:realtime-sse') as RealtimeSseService;
+    const received: string[] = [];
+
+    service.subscribe({ eventName: 'folder', resourceId: '123' }, () => received.push('folder:123'));
+    service.subscribe({ eventName: 'folder', resourceId: '456' }, () => received.push('folder:456'));
+    service.subscribe({ eventName: 'notifications' }, () => received.push('notifications'));
+
+    deliver(port, { eventName: 'folder', resourceId: '123', payload: {} });
+    // The server serialises a missing resourceId as null
+    deliver(port, { eventName: 'notifications', resourceId: null, payload: {} });
+
+    assert.deepEqual(received, ['folder:123', 'notifications']);
+  });
+
+  test('posts unsubscribe with the topic once the last callback is removed', function (assert) {
+    const port = installWorkerMock();
+    const service = this.owner.lookup('service:realtime-sse') as RealtimeSseService;
+
+    const unsubA = service.subscribe({ eventName: 'folder', resourceId: '123' }, () => {});
+    const unsubB = service.subscribe({ eventName: 'folder', resourceId: '123' }, () => {});
+    port.calls.length = 0;
+
+    unsubA();
+    assert.strictEqual(postMessageCalls(port).length, 0, 'still one callback left');
+
+    unsubB();
+    assert.deepEqual(postMessageCalls(port).map((c) => c.args[0]), [
+      { type: 'unsubscribe', topic: { eventName: 'folder', resourceId: '123' } },
+    ]);
   });
 });

@@ -2,6 +2,7 @@ package com.demo.sse.service;
 
 import com.demo.sse.model.Document;
 import com.demo.sse.model.Folder;
+import com.demo.sse.model.Topic;
 import com.demo.sse.model.User;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
@@ -83,7 +84,7 @@ public class LibraryService {
                 "sharedByUsername", sharedBy != null ? sharedBy.getDisplayName() : ownerUserId,
                 "timestamp", Instant.now().toString()
         );
-        sseEmitterService.publish(targetUserId, "user:" + targetUserId + ":notifications", notificationPayload);
+        sseEmitterService.publish(targetUserId, Topic.NOTIFICATIONS, notificationPayload);
 
         log.debug("Folder {} shared with userId={}", folderId, targetUserId);
         return folder;
@@ -119,7 +120,7 @@ public class LibraryService {
                 "timestamp", doc.getCreatedAt().toString()
         );
 
-        String topic = "folder:" + folderId;
+        Topic topic = Topic.folder(folderId);
         Set<String> recipients = new HashSet<>(folder.getAllMemberIds());
         recipients.remove(creatorUserId); // Don't notify the creator
 
@@ -129,7 +130,7 @@ public class LibraryService {
         for (String recipientId : recipients) {
             Map<String, Object> notifPayload = new HashMap<>(eventPayload);
             notifPayload.put("type", "DOCUMENT_CREATED_NOTIFICATION");
-            sseEmitterService.publish(recipientId, "user:" + recipientId + ":notifications", notifPayload);
+            sseEmitterService.publish(recipientId, Topic.NOTIFICATIONS, notifPayload);
         }
 
         log.debug("Document '{}' created in folder {} by userId={}", name, folderId, creatorUserId);
@@ -168,7 +169,7 @@ public class LibraryService {
                 "timestamp", Instant.now().toString()
         );
 
-        String topic = "folder:" + doc.getFolderId();
+        Topic topic = Topic.folder(doc.getFolderId());
         Set<String> recipients = new HashSet<>(folder.getAllMemberIds());
         recipients.remove(userId);
         sseEmitterService.publishToUsers(recipients, topic, eventPayload);
