@@ -41,6 +41,9 @@ export default class RealtimeSseService extends Service {
   @tracked isReconnecting = false;
 
   private worker: SharedWorker | null = null;
+  /** Releases this tab's lifetime lock (see holdLifetimeLock) */
+  private releaseLifetimeLock: (() => void) | null = null;
+  private isTornDown = false;
   /** topicKey -> topic and the callbacks registered for it in this tab */
   private callbacks = new Map<string, { topic: SseTopic; cbs: Set<SseCallback> }>();
 
@@ -71,14 +74,46 @@ export default class RealtimeSseService extends Service {
       this.worker.onerror = (e) =>
         console.error('[RealtimeSSE] Worker error:', e);
       this.worker.port.start();
+      this.holdLifetimeLock();
     } catch (err) {
       console.error('[RealtimeSSE] Failed to create SharedWorker:', err);
     }
   }
 
+  /**
+   * Hold a Web Lock for as long as this document lives and tell the worker its name.
+   *
+   * MessagePort gives the worker no signal when a tab closes, reloads or crashes
+   * (postMessage to a dead port silently does nothing). The browser does release
+   * a document's locks when it is destroyed, so the worker waits on this lock to
+   * learn that the tab is gone and drop its port and subscriptions.
+   *
+   * The name is only sent once the lock is granted: if the worker's request reached
+   * the lock manager first, it would be granted immediately and the worker would
+   * wrongly treat this tab as closed.
+   */
+  private holdLifetimeLock() {
+    if (!navigator.locks) {
+      console.warn('[RealtimeSSE] Web Locks unavailable - closed tabs will not be detected');
+      return;
+    }
+
+    const lockName = `sse-tab-${crypto.randomUUID()}`;
+    void navigator.locks.request(lockName, () => {
+      if (this.isTornDown) return;
+      this.worker?.port.postMessage({ type: 'register-lock', lockName });
+      return new Promise<void>((resolve) => {
+        this.releaseLifetimeLock = resolve;
+      });
+    });
+  }
+
   private teardown() {
+    this.isTornDown = true;
     this.worker?.port.postMessage({ type: 'disconnect' });
     this.worker?.port.close();
+    this.releaseLifetimeLock?.();
+    this.releaseLifetimeLock = null;
     this.callbacks.clear();
   }
 

@@ -11,6 +11,7 @@
  * Port message protocol:
  *   { type: 'subscribe',   topic: Topic }        → register interest in a topic
  *   { type: 'unsubscribe', topic: Topic }        → deregister interest
+ *   { type: 'register-lock', lockName: string }  → tab holds this Web Lock for its lifetime
  *   { type: 'disconnect' }                       → port is closing (Ember app teardown)
  *   { type: 'disconnect-sse' }                   → close SSE connection (on logout)
  *   { type: 'connect-sse' }                      → establish SSE connection (after re-login)
@@ -20,6 +21,12 @@
  *   { type: 'sse:connected' }                    → SSE link up
  *   { type: 'sse:reconnecting' }                 → SSE link dropped, auto-reconnecting
  *   { eventName, resourceId, payload }           → event routed to subscriber
+ *
+ * Closed tabs: postMessage to a closed, reloaded or crashed tab's port does not
+ * throw, so dead ports can't be detected by writing to them. Instead each tab
+ * holds a Web Lock while its document is alive and registers its name here; the
+ * worker queues a request for the same lock, which the browser grants once the
+ * tab is gone, and the port is removed then.
  */
 
 /** @typedef {{ eventName: string, resourceId?: string | null }} Topic */
@@ -217,7 +224,7 @@ self.onconnect = (connectEvent) => {
   connectSSE();
 
   port.onmessage = (event) => {
-    const { type, topic } = event.data ?? {};
+    const { type, topic, lockName } = event.data ?? {};
     const entry = portRegistry.get(portId);
     if (!entry) return;
 
@@ -237,6 +244,17 @@ self.onconnect = (connectEvent) => {
           entry.topics.delete(key);
           decrementTopic(key);
           console.debug(`[SSEWorker] Port ${portId} unsubscribed from ${key}`);
+        }
+        break;
+
+      case 'register-lock':
+        if (lockName && self.navigator.locks) {
+          // Granted only once the tab releases the lock, i.e. its document is gone
+          self.navigator.locks.request(lockName, () => {
+            if (!portRegistry.has(portId)) return;
+            console.debug(`[SSEWorker] Port ${portId} released its lock (tab gone)`);
+            removePort(portId);
+          });
         }
         break;
 

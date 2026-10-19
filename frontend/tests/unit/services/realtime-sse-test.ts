@@ -255,3 +255,61 @@ module('Unit | Service | realtime-sse — topics', function (hooks) {
     ]);
   });
 });
+
+module('Unit | Service | realtime-sse — lifetime lock', function (hooks) {
+  setupTest(hooks);
+
+  let savedSharedWorker: unknown;
+
+  hooks.beforeEach(function () {
+    savedSharedWorker = (window as unknown as Record<string, unknown>)['SharedWorker'];
+  });
+
+  hooks.afterEach(function () {
+    (window as unknown as Record<string, unknown>)['SharedWorker'] = savedSharedWorker;
+  });
+
+  async function waitForLockName(port: MockPort): Promise<string> {
+    for (let i = 0; i < 50; i++) {
+      const call = postMessageCalls(port).find(
+        (c) => (c.args[0] as Record<string, unknown>)['type'] === 'register-lock',
+      );
+      if (call) return (call.args[0] as { lockName: string }).lockName;
+      await new Promise((r) => setTimeout(r, 20));
+    }
+    throw new Error('register-lock was never posted');
+  }
+
+  async function isHeld(lockName: string): Promise<boolean> {
+    const { held = [] } = await navigator.locks.query();
+    return held.some((l) => l.name === lockName);
+  }
+
+  test('posts register-lock with a lock this tab already holds', async function (assert) {
+    const port = installWorkerMock();
+    const service = this.owner.lookup('service:realtime-sse') as RealtimeSseService;
+
+    const lockName = await waitForLockName(port);
+
+    assert.true(lockName.startsWith('sse-tab-'), 'lock name is namespaced');
+    assert.true(await isHeld(lockName), 'lock is held when the worker is told about it');
+
+    destroy(service);
+  });
+
+  test('releases the lifetime lock on teardown', async function (assert) {
+    const port = installWorkerMock();
+    const service = this.owner.lookup('service:realtime-sse') as RealtimeSseService;
+    const lockName = await waitForLockName(port);
+
+    destroy(service);
+
+    // Release happens asynchronously once the held promise settles
+    let held = true;
+    for (let i = 0; i < 50 && held; i++) {
+      await new Promise((r) => setTimeout(r, 20));
+      held = await isHeld(lockName);
+    }
+    assert.false(held, 'lock released so the worker can clean up');
+  });
+});
