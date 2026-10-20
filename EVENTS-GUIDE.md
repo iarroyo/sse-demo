@@ -6,6 +6,30 @@ This document outlines the end-to-end architecture of our Server-Sent Events (SS
 
 To optimize performance, the architecture relies on a SharedWorker (sse-worker.js) that acts as a centralized hub inside the browser. Instead of every open tab establishing its own independent connection to the server, all tabs from the same origin share a single EventSource connection. This design pattern successfully bypasses the standard browser limitation of six concurrent connections per origin and significantly reduces unnecessary server load.
 
+## Glossary
+
+| Term | Meaning |
+|---|---|
+| **Back/forward cache (BFCache)** | Browser feature that keeps a page frozen in memory after the user navigates away, so Back/Forward can restore it instantly. A cached page is not destroyed, so it keeps its port, lock and subscriptions. |
+| **Dead port** | A port whose tab has been closed, reloaded or has crashed. Messages posted to it are silently dropped. |
+| **Emitter** | The server-side object (`SseEmitter`) representing one open SSE connection. Each SharedWorker has one emitter. |
+| **Emitter ID** (`emitterId`) | UUID the server assigns to an emitter and sends as the first SSE event (`emitter:id`). The worker sends it in the `X-Emitter-Id` header when registering subscriptions. Tabs never see it. |
+| **`eventName`** | The kind of event stream a topic refers to, e.g. `folder` or `notifications`. |
+| **EventSource** | The browser API that opens and keeps an SSE connection, reconnecting automatically after network errors. |
+| **Heartbeat** | A `:heartbeat` SSE comment the server sends every 25 seconds so proxies don't close an idle connection. Browsers ignore comments, so heartbeats never reach the worker's message handler. |
+| **Lifetime lock** | The Web Lock a tab holds for as long as its page lives, named `sse-tab-<uuid>`. Its release tells the worker the tab is gone. |
+| **Port** (`MessagePort`) | The two-way message channel between one tab and the SharedWorker. Each tab has its own port. |
+| **`portRegistry`** | The worker's map of open ports, each with the set of topics that tab is subscribed to. |
+| **`RealtimeSseService`** | The Ember service each tab uses to subscribe to topics. It talks only to the worker, never to the server. |
+| **`resourceId`** | The identifier of the resource a topic is about, such as a folder ID. Optional: `notifications` has none. |
+| **Server-Sent Events (SSE)** | A one-way HTTP stream on which the server pushes events to the browser. |
+| **SharedWorker** (`sse-worker.js`) | A background script shared by all tabs of the same origin. It owns the single SSE connection and routes events to tabs. |
+| **Subscription** | Interest in a topic, tracked at three levels: callbacks in each tab, ports in the worker, and topics per emitter on the server. The server only sends an emitter the events of topics it subscribed to. |
+| **Topic** | What a subscriber listens to: `{ eventName, resourceId? }`. Topics never contain a userId; the server sends events only to the logged-in user's emitters. |
+| **Topic key** | String built from `eventName` and `resourceId` that the service and the worker use to index topics, since two objects with the same content are not equal in JavaScript. |
+| **`topicRefCount`** | The worker's count of how many tabs are subscribed to each topic. The worker calls the server only when a count goes from 0 to 1 (subscribe) or 1 to 0 (unsubscribe). |
+| **Web Lock** | A named lock shared by all tabs and workers of an origin (`navigator.locks`). Only one holder at a time; other requests wait. The browser releases a page's locks when the page is destroyed. |
+
 ## Communication Protocol
 
 The tabs and the SharedWorker communicate via a structured messaging protocol:
@@ -15,7 +39,7 @@ The tabs and the SharedWorker communicate via a structured messaging protocol:
 - **Subscribe:** Registers a tab's interest in a specific topic. A topic is an object `{ eventName, resourceId? }`, for example `{ eventName: 'folder', resourceId: '123' }` or `{ eventName: 'notifications' }`. Topics never contain a userId: the server resolves the user from the session and only sends events to that user's connections.
 - **Unsubscribe:** Deregisters interest from a topic. Ignored if the tab never subscribed to it.
 - **Register Lock:** Tells the worker the name of the Web Lock the tab holds for as long as its page lives, so the worker can tell when the tab is gone (see Dead Port Detection).
-- **Disconnect:** Notifies the worker that a port is going away. Because `RealtimeSseService` is an application-scoped service, it is only destroyed when the Ember application itself is torn down — not on route transitions. In practice this message is rarely sent in a normal user session (test teardown or an explicit `app.destroy()` call are the typical triggers). On a hard tab close or any external navigation the JavaScript context is killed immediately and the worker discovers the dead port passively on the next write attempt.
+- **Disconnect:** Notifies the worker that a port is going away. Because `RealtimeSseService` is an application-scoped service, it is only destroyed when the Ember application itself is torn down — not on route transitions. In practice this message is rarely sent in a normal user session (test teardown or an explicit `app.destroy()` call are the typical triggers). On a hard tab close, reload or external navigation no disconnect is sent; the worker learns the tab is gone when its lifetime lock is released (see Dead Port Detection).
 - **Disconnect SSE:** Closes the SSE connection without reconnecting, used on logout so the logged-out browser stops receiving the previous user's events.
 - **Connect SSE:** Establishes a fresh SSE connection, typically used after a user re-authenticates.
 
