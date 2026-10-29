@@ -1,6 +1,6 @@
 # SSE Sequence Diagrams
 
-Visual representation of all lifecycle scenarios. See `SSE-ARCHITECTURE.md` for detailed
+Visual representation of all lifecycle scenarios. See `EVENTS-GUIDE.md` for detailed
 written descriptions.
 
 `T` stands for the topic `{ eventName: "folder", resourceId: "123" }`. Maps in the
@@ -121,7 +121,34 @@ sequenceDiagram
 
 ---
 
-## 5. SSE Connection Drop & Reconnect
+## 5. Graceful App Teardown
+
+The Ember application is explicitly destroyed (e.g. `app.destroy()` or test teardown).
+Component destructors fire first, unsubscribing all topics before the service destructor
+sends `disconnect`. In-app route transitions do not trigger this path — the service is
+application-scoped and stays alive for the entire session.
+
+```mermaid
+sequenceDiagram
+    participant Service as RealtimeSseService
+    participant Worker as SharedWorker
+    participant Server as BFF
+
+    Note over Service: app.destroy() or test teardown<br/>(component destructors have already unsubscribed all topics)
+    Service->>Worker: { type: "disconnect" }
+    Worker->>Worker: portRegistry.delete(portId)
+
+    alt Last tab
+        Worker->>Worker: disconnectSSE() - EventSource closed, worker becomes idle
+        Note over Server: Next heartbeat write fails (≤ 25 s)<br/>emitter removed, topic set deleted
+    else Other tabs still open
+        Note over Worker: SSE connection unaffected
+    end
+```
+
+---
+
+## 6. SSE Connection Drop & Reconnect
 
 Network error or server restart. `EventSource` auto-reconnects, a new emitter is created,
 and topics are re-registered with the server.
@@ -153,7 +180,7 @@ sequenceDiagram
 
 ---
 
-## 6. Logout & Re-login
+## 7. Logout & Re-login
 
 SSE is closed before session invalidation, because logout does not close the stream on the
 server and it would keep delivering the old user's events. A new emitter is assigned after
@@ -194,11 +221,34 @@ sequenceDiagram
 
 ---
 
-## 7. Hard Tab Close - Lifetime Lock
+## 8. Total Downtime & Fresh Restart
+
+All tabs are closed so the browser terminates the SharedWorker. When the user returns and
+opens a new tab, the system performs a full cold start identical to Diagram 1. Any events
+published by the server during the downtime window are permanently lost.
+
+```mermaid
+sequenceDiagram
+    participant Tab
+    participant Worker as SharedWorker
+    participant Server as BFF
+
+    Note over Tab,Worker: Last tab closed - browser terminates the SharedWorker
+    Worker--xServer: EventSource closed with the worker
+    Note over Server: Next heartbeat write fails (≤ 25 s)<br/>emitter removed, topic set deleted
+
+    Note over Tab: User returns and opens a new tab
+    Tab->>Worker: new SharedWorker() (fresh process spawned)
+    Note over Tab,Server: Cold start - identical to Diagram 1<br/>Events published during downtime are permanently lost
+```
+
+---
+
+## 9. Hard Tab Close - Lifetime Lock
 
 The tab is closed with no `disconnect` message, and posting to its port would not throw.
 The worker learns about it from the tab's Web Lock instead (see Scenario 9 in
-`SSE-ARCHITECTURE.md`).
+`EVENTS-GUIDE.md`).
 
 ```mermaid
 sequenceDiagram
